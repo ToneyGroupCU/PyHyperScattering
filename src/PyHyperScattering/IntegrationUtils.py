@@ -16,6 +16,10 @@ import pandas as pd
 
 import json
 
+## Set a colormap
+cm = plt.cm.terrain.copy()
+cm.set_bad('purple')
+
 class Check:
     '''
     Quick Utility to display a mask next to an image, to sanity check the orientation of e.g. an imported mask
@@ -70,7 +74,7 @@ class Check:
         ax.add_patch(beamcenter)
         ax.add_patch(guide1)
         ax.add_patch(guide2)
-    def checkAll(integrator,img,img_min=1,img_max=10000,img_scaling='log',alpha=1,d_inner=50,d_outer=150):
+    def checkAll(integrator,img,img_min=1e1,img_max=5e3,img_scaling='log',alpha=1):
         '''
             draw the beamcenter and overlay mask on an image
 
@@ -89,15 +93,16 @@ class Check:
             norm=LogNorm(img_min,img_max)
         else:
             norm=Normalize(img_min,img_max)
-        img.plot(norm=norm,ax=ax)
+        img.plot.imshow(origin='lower', norm=norm, ax=ax, interpolation='antialiased', cmap=cm)
         ax.set_aspect(1)
         beamcenter = plt.Circle((integrator.ni_beamcenter_x, integrator.ni_beamcenter_y), 5, color='lawngreen')
-        guide1 = plt.Circle((integrator.ni_beamcenter_x, integrator.ni_beamcenter_y), d_inner, color='lawngreen',fill=False)
-        guide2 = plt.Circle((integrator.ni_beamcenter_x, integrator.ni_beamcenter_y), d_outer, color='lawngreen',fill=False)
+        guide1 = plt.Circle((integrator.ni_beamcenter_x, integrator.ni_beamcenter_y), 50, color='lawngreen',fill=False)
+        guide2 = plt.Circle((integrator.ni_beamcenter_x, integrator.ni_beamcenter_y), 150, color='lawngreen',fill=False)
         ax.add_patch(beamcenter)
         ax.add_patch(guide1)
         ax.add_patch(guide2)
         ax.imshow(integrator.mask,origin='lower',alpha=alpha)
+
 class DrawMask:
     '''
     Utility class for interactively drawing a mask in a Jupyter notebook.
