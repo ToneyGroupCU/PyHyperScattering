@@ -19,7 +19,8 @@ try:
     from httpx import HTTPStatusError
     import tiled
     import dask
-    from databroker.queries import RawMongo, Key, FullText, Contains, Regex
+    from databroker.queries import RawMongo, Key, FullText, Contains, Regex, ScanIDRange
+    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 except:
     print(
         "Imports failed.  Are you running on a machine with proper libraries for databroker, tiled, etc.?"
@@ -126,9 +127,10 @@ class SST1RSoXSDB:
         sampleID: str = None,
         plan: str = None,
         userOutputs: list = [],
+        debugWarnings: bool = False,
         **kwargs,
     ) -> pd.DataFrame:
-        """Search the databroker.client.CatalogOfBlueskyRuns for scans matching all provided keywords and return metadata as a dataframe.
+        """Search the Bluesky catalog for scans matching all provided keywords and return metadata as a dataframe.
 
         Matches are made based on the values in the top level of the 'start' dict within the metadata of each
         entry in the Bluesky Catalog (databroker.client.CatalogOfBlueskyRuns). Based on the search arguments provided,
@@ -186,15 +188,15 @@ class SST1RSoXSDB:
                 Valid options for the Metadata Source are any of [r'catalog.start', r'catalog.start["plan_args"], r'catalog.stop',
                 r'catalog.stop["num_events"]']
                 e.g., userOutputs = [["Exposure Multiplier","exptime", r'catalog.start'], ["Stop Time","time",r'catalog.stop']]
-
+            debugWarnings (bool, optional): if True, raises a warning with debugging information whenever a key can't be found.
         Returns:
-            pd.Dataframe containing the results of the search, or an empty dataframe if the search fails
+            Pandas dataframe containing the results of the search, or an empty dataframe if the search fails
         """
 
         # Pull in the reference to the databroker.client.CatalogOfBlueskyRuns attribute
         bsCatalog = self.c
 
-        ### Part 1: Search the database sequentially, reducing based on matches to search terms
+        # Part 1: Search the database sequentially, reducing based on matches to search terms
         # Plan the 'default' search through the keyword parameters, build list of [metadata ID, user input value, match type]
         defaultSearchDetails = [
             ["cycle", cycle, "case-insensitive"],
@@ -219,26 +221,21 @@ class SST1RSoXSDB:
             elif isinstance(value, list) and len(value) == 2:
                 userSearchList.append([userLabel, value[0], value[1]])
             else:  # bad user input
-                warnString = (
-                    "Error parsing a keyword search term, check the format.\nSkipped argument: "
-                    + str(value)
-                )
-                warnings.warn(warnString, stacklevel=2)
+                raise ValueError(
+                    f"Error parsing a keyword search term, check the format.  Skipped argument: {value} ")
 
         # combine the lists of lists
         fullSearchList = defaultSearchDetails + userSearchList
 
         df_SearchDet = pd.DataFrame(
-            fullSearchList, columns=["Metadata field:", "User input:", "Search scheme:"]
+            fullSearchList, columns=[
+                "Metadata field:", "User input:", "Search scheme:"]
         )
 
         # Iterate through search terms sequentially, reducing the size of the catalog based on successful matches
 
         reducedCatalog = bsCatalog
-        loopDesc = "Searching by keyword arguments"
-        for index, searchSeries in tqdm(
-            df_SearchDet.iterrows(), total=df_SearchDet.shape[0], desc=loopDesc
-        ):
+        for _, searchSeries in tqdm(df_SearchDet.iterrows(), total=df_SearchDet.shape[0], desc="Running catalog search..."):
 
             # Skip arguments with value None, and quits if the catalog was reduced to 0 elements
             if (searchSeries[1] is not None) and (len(reducedCatalog) > 0):
@@ -262,7 +259,8 @@ class SST1RSoXSDB:
                         reg_prefix += "^"
                         reg_postfix += "$"
 
-                    regexString = reg_prefix + str(searchSeries[1]) + reg_postfix
+                    regexString = reg_prefix + \
+                        str(searchSeries[1]) + reg_postfix
 
                     # Search/reduce the catalog
                     reducedCatalog = reducedCatalog.search(
@@ -272,34 +270,29 @@ class SST1RSoXSDB:
                 # If a match fails, notify the user which search parameter yielded 0 results
                 if len(reducedCatalog) == 0:
                     warnString = (
-                        "Catalog reduced to zero when attempting to match the following condition:\n"
-                        + searchSeries.to_string()
-                        + "\n If this is a user-provided search parameter, check spelling/syntax.\n"
+                        f"Catalog reduced to zero when attempting to match {searchSeries}\n"
+                        + f"If this is a user-provided search parameter, check spelling/syntax."
                     )
                     warnings.warn(warnString, stacklevel=2)
                     return pd.DataFrame()
 
-        ### Part 2: Build and return output dataframe
+        # Part 2: Build and return output dataframe
 
-        if (
-            outputType == "scans"
-        ):  # Branch 2.1, if only scan IDs needed, build and return a 1-column dataframe
+        if (outputType == "scans"):
+            # Branch 2.1, if only scan IDs needed, build and return a 1-column dataframe
             scan_ids = []
-            loopDesc = "Building scan list"
-            for index, scanEntry in tqdm(
-                (enumerate(reducedCatalog)), total=len(reducedCatalog), desc=loopDesc
-            ):
-                scan_ids.append(reducedCatalog[scanEntry].start["scan_id"])
+            for scanEntry in tqdm(reducedCatalog.values(), desc="Building scan list"):
+                scan_ids.append(scanEntry.start["scan_id"])
             return pd.DataFrame(scan_ids, columns=["Scan ID"])
 
         else:  # Branch 2.2, Output metadata from a variety of sources within each the catalog entry
-
+            missesDuringLoad = False
             # Store details of output values as a list of lists
             # List elements are [Output Column Title, Bluesky Metadata Code, Metadata Source location, Applicable Output flag]
             outputValueLibrary = [
                 ["scan_id", "scan_id", r"catalog.start", "default"],
                 ["uid", "uid", r"catalog.start", "ext_bio"],
-                ["start time", "time", r"catalog.start", "default"],
+                ["start_time", "time", r"catalog.start", "default"],
                 ["cycle", "cycle", r"catalog.start", "default"],
                 ["saf", "SAF", r"catalog.start", "ext_bio"],
                 ["user_name", "user_name", r"catalog.start", "ext_bio"],
@@ -336,11 +329,8 @@ class SST1RSoXSDB:
                     activeOutputValues.append(userOutEntry)
                     activeOutputLabels.append(userOutEntry[0])
                 else:  # bad user input
-                    warnString = (
-                        "Error parsing user-provided output request, check the format.\nSkipped: "
-                        + str(userOutEntry)
-                    )
-                    warnings.warn(warnString, stacklevel=2)
+                    raise ValueError(
+                        f"Error parsing user-provided output request {userOutEntry}, check the format.", stacklevel=2)
 
             # Add any user-provided search terms
             for userSearchEntry in userSearchList:
@@ -358,16 +348,13 @@ class SST1RSoXSDB:
             outputList = []
 
             # Outer loop: Catalog entries
-            loopDesc = "Building output dataframe"
-            for index, scanEntry in tqdm(
-                (enumerate(reducedCatalog)), total=len(reducedCatalog), desc=loopDesc
-            ):
-
+            for scanEntry in tqdm(reducedCatalog.values(), desc="Retrieving results..."):
                 singleScanOutput = []
 
                 # Pull the start and stop docs once
-                currentCatalogStart = reducedCatalog[scanEntry].start
-                currentCatalogStop = reducedCatalog[scanEntry].stop
+
+                currentCatalogStart = scanEntry.start
+                currentCatalogStop = scanEntry.stop
 
                 currentScanID = currentCatalogStart["scan_id"]
 
@@ -378,49 +365,47 @@ class SST1RSoXSDB:
                     metaDataSource = outputEntry[2]
 
                     try:  # Add the metadata value depending on where it is located
-                        if metaDataSource == r"catalog.start":
-                            singleScanOutput.append(currentCatalogStart[metaDataLabel])
+                        if metaDataLabel == 'time':
+                            singleScanOutput.append(
+                                datetime.datetime.fromtimestamp(currentCatalogStart['time']))
+                            # see Zen of Python # 9,8 for justification
+                        elif metaDataSource == r"catalog.start":
+                            singleScanOutput.append(
+                                currentCatalogStart[metaDataLabel])
                         elif metaDataSource == r'catalog.start["plan_args"]':
                             singleScanOutput.append(
                                 currentCatalogStart["plan_args"][metaDataLabel]
                             )
                         elif metaDataSource == r"catalog.stop":
-                            singleScanOutput.append(currentCatalogStop[metaDataLabel])
+                            singleScanOutput.append(
+                                currentCatalogStop[metaDataLabel])
                         elif metaDataSource == r'catalog.stop["num_events"]':
                             singleScanOutput.append(
                                 currentCatalogStop["num_events"][metaDataLabel]
                             )
                         else:
-                            warnString = (
-                                "Scan: > "
-                                + str(currentScanID)
-                                + " < Failed to locate metaData entry for > "
-                                + str(outputVariableName)
-                                + " <\n Tried looking for label: > "
-                                + str(metaDataLabel)
-                                + " < in: "
-                                + str(metaDataSource)
-                            )
-                            warnings.warn(warnString, stacklevel=2)
+                            if debugWarnings:
+                                warnings.warn(
+                                    f'Failed to locate metadata for {outputVariableName} in scan {currentScanID}.',
+                                    stacklevel=2)
+                            missesDuringLoad = True
 
                     except (KeyError, TypeError):
-                        warnString = (
-                            "Scan: > "
-                            + str(currentScanID)
-                            + " < Failed to locate metaData entry for > "
-                            + str(outputVariableName)
-                            + " <\n Tried looking for label: > "
-                            + str(metaDataLabel)
-                            + " < in: "
-                            + str(metaDataSource)
-                        )
-                        # warnings.warn(warnString, stacklevel=2)
+                        if debugWarnings:
+                            warnings.warn(
+                                f'Failed to locate metadata for {outputVariableName} in scan {currentScanID}.',
+                                stacklevel=2)
+                        missesDuringLoad = True
                         singleScanOutput.append("N/A")
 
                 # Append to the filled output list for this entry to the list of lists
                 outputList.append(singleScanOutput)
 
             # Convert to dataframe for export
+            if missesDuringLoad:
+                warnings.warn(
+                    f'One or more missing field(s) during this load were replaced with "N/A".  Re-run with debugWarnings=True to see details.',
+                    stacklevel=2)
             return pd.DataFrame(outputList, columns=activeOutputLabels)
 
     def background(f):
@@ -468,7 +453,8 @@ class SST1RSoXSDB:
         axes = []
         label_vals = []
         for run in run_list:
-            loaded = self.loadRun(self.c[run], **loadrun_kwargs).unstack("system")
+            loaded = self.loadRun(
+                self.c[run], **loadrun_kwargs).unstack("system")
             axis = list(loaded.indexes.keys())
             try:
                 axis.remove("pix_x")
@@ -533,7 +519,8 @@ class SST1RSoXSDB:
             )
 
         md = self.loadMd(run)
-        monitors = self.loadMonitors(run, useShutterThinning=useMonitorShutterThinning)
+        monitors = self.loadMonitors(
+            run, useShutterThinning=useMonitorShutterThinning)
         if "NEXAFS" in md["start"]["plan_name"]:
             raise NotImplementedError(
                 f"Scan {md['start']['scan_id']} is a {md['start']['plan_name']} NEXAFS scan.  NEXAFS loading is not yet supported."
@@ -595,7 +582,8 @@ class SST1RSoXSDB:
 
         for dim in dims:
             try:
-                test = len(md[dim])  # this will throw a typeerror if single value
+                # this will throw a typeerror if single value
+                test = len(md[dim])
                 if type(md[dim]) == dask.array.core.Array:
                     dims_to_join.append(md[dim].compute())
                 else:
@@ -609,7 +597,8 @@ class SST1RSoXSDB:
             dims_to_join.append(val)
             dim_names_to_join.append(key)
 
-        index = pd.MultiIndex.from_arrays(dims_to_join, names=dim_names_to_join)
+        index = pd.MultiIndex.from_arrays(
+            dims_to_join, names=dim_names_to_join)
         # handle the edge case of a partly-finished scan
         if len(index) != len(data["time"]):
             index = index[: len(data["time"])]
@@ -709,7 +698,7 @@ class SST1RSoXSDB:
             Presently bins are averaged between measurements intervals.
         useShutterThinning : bool, optional
             Whether or not to attempt to thin (filter) the raw time streams to remove data collected during shutter opening/closing, by default False
-            As of 230209 at NSLS2 SST1, using useShutterThinning= True for exposure times of < 0.5s is
+            As of 9 Feb 2023 at NSLS2 SST1, using useShutterThinning= True for exposure times of < 0.5s is
             not recommended because the shutter data is unreliable and too many points will be culled
         n_thinning_iters : int, optional
             how many iterations of thinning to perform, by default 5
@@ -730,7 +719,8 @@ class SST1RSoXSDB:
                     # incantation to extract the dataset from the bluesky stream
                     monitors = entry[stream_name].data.read()
                 else:  # merge into the to existing output xarray
-                    monitors = xr.merge((monitors, entry[stream_name].data.read()))
+                    monitors = xr.merge(
+                        (monitors, entry[stream_name].data.read()))
 
         # At this stage monitors has dimension time and all streams as data variables
         # the time dimension inherited all time values from all streams
@@ -751,7 +741,8 @@ class SST1RSoXSDB:
                         type(entry.primary.data["time"])
                         == tiled.client.array.DaskArrayClient
                     ):
-                        primary_time = entry.primary.data["time"].read().compute()
+                        primary_time = entry.primary.data["time"].read(
+                        ).compute()
                     elif (
                         type(entry.primary.data["time"])
                         == tiled.client.array.ArrayClient
@@ -785,7 +776,8 @@ class SST1RSoXSDB:
                 # Bin the indexes in 'time' based on the intervales between timepoints in 'primary_time' and evaluate their mean
                 # Then rename the 'time_bin' dimension that results to 'time'
                 monitors = (
-                    monitors.groupby_bins("time", np.insert(primary_time, 0, 0))
+                    monitors.groupby_bins(
+                        "time", np.insert(primary_time, 0, 0))
                     .mean()
                     .rename_dims({"time_bins": "time"})
                 )
@@ -801,7 +793,7 @@ class SST1RSoXSDB:
             except Exception as e:
                 # raise e # for testing
                 warnings.warn(
-                    "Error while time-integrating onto images.  Check data.",
+                    "Error while time-integrating monitors onto images.  Usually, this indicates a problem with the monitors, this is a critical error if doing normalization otherwise fine to ignore.",
                     stacklevel=2,
                 )
         return monitors
@@ -843,7 +835,8 @@ class SST1RSoXSDB:
                     "beamcenter_x"
                 ] = 498  # not the best estimate; I didn't have great data
                 md["beamcenter_y"] = 498
-                md["sdd"] = 512.12  # GUESS; SOMEONE SHOULD CONFIRM WITH A BCP MAYBE??
+                # GUESS; SOMEONE SHOULD CONFIRM WITH A BCP MAYBE??
+                md["sdd"] = 512.12
             else:
                 md["beamcenter_x"] = run.start["RSoXS_SAXS_BCX"]
                 md["beamcenter_y"] = run.start["RSoXS_SAXS_BCY"]
@@ -902,7 +895,8 @@ class SST1RSoXSDB:
             "sam_th": "RSoXS Sample Rotation",
             "polarization": "en_polarization_setpoint",
             "energy": "en_energy_setpoint",
-            "exposure": "RSoXS Shutter Opening Time (ms)",  # md['detector']+'_cam_acquire_time'
+            # md['detector']+'_cam_acquire_time'
+            "exposure": "RSoXS Shutter Opening Time (ms)",
         }
         md_secondary_lookup = {
             "energy": "en_monoen_setpoint",
@@ -1047,8 +1041,10 @@ class SST1RSoXSDB:
                 / (headerdict["sdd"] / 1000)
                 / (headerdict["wavelength"] * 1e10)
             )
-            qx = (np.arange(1, img.size[0] + 1) - headerdict["beamcenter_x"]) * qpx
-            qy = (np.arange(1, img.size[1] + 1) - headerdict["beamcenter_y"]) * qpx
+            qx = (np.arange(1, img.size[0] + 1) -
+                  headerdict["beamcenter_x"]) * qpx
+            qy = (np.arange(1, img.size[1] + 1) -
+                  headerdict["beamcenter_y"]) * qpx
             # now, match up the dims and coords
             return xr.DataArray(
                 img, dims=["qy", "qx"], coords={"qy": qy, "qx": qx}, attrs=headerdict
