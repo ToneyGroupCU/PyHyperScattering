@@ -2,6 +2,7 @@ import warnings
 import xarray as xr
 import numpy as np
 import math
+import matplotlib.pyplot as plt
 
 try:
     import holoviews as hv

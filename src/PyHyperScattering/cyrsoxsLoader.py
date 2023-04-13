@@ -230,7 +230,8 @@ class cyrsoxsLoader():
                     time.sleep(0.5)
                     
             if i==0:
-                with h5py.File(directory/'HDF5'/hd5files[i],'r') as h5:
+                # with h5py.File(directory/'HDF5'/hd5files[i],'r') as h5:
+                with h5py.File(directory.joinpath('output','HDF5', f'{hd5files[i]}'), 'r') as h5:
                     try:
                         img = h5['K0']['projection'][()]
                     except KeyError:
@@ -241,7 +242,8 @@ class cyrsoxsLoader():
                 data = np.zeros([NumX*NumY*num_energies])
                 
             else:
-                with h5py.File(directory/'HDF5'/hd5files[i],'r') as h5:
+                # with h5py.File(directory/'HDF5'/hd5files[i],'r') as h5:
+                with h5py.File(directory.joinpath('output','HDF5', f'{hd5files[i]}'), 'r') as h5:
                     try:
                         img = h5['K0']['projection'][()]
                     except KeyError:

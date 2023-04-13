@@ -103,10 +103,10 @@ class RSoXS:
     def select_q(self,q,method='interp'):
         return self._obj.sel(q=q,method=method)
     def select_pol(self,pol,method='nearest'):
-        return self._obj.sel(polarization=pol,method=method)
+        return self._obj.sel(pol=pol,method=method)
 
 
-    def AR(self,calc2d=False,two_AR=False,chi_width=5,calc2d_norm_energy=None):
+    def AR(self,calc2d=False, pol=0,two_AR=False,chi_width=10,calc2d_norm_energy=None):
         '''
         Calculate the RSoXS Anisotropic Ratio (AR) of either a single RSoXS scan or a polarized pair of scans.
 
@@ -119,28 +119,35 @@ class RSoXS:
             calc2d_norm_energy (numeric): if set, normalizes each polarization's AR at a given energy.  THIS EFFECTIVELY FORCES THE AR TO 0 AT THIS ENERGY.
         '''
         if(not calc2d):
-            para = self.slice_chi(0,chi_width=chi_width)
-            perp = self.slice_chi(-90,chi_width=chi_width)
-            return ((para - perp) / (para+perp))
+            if pol==0:
+                para = self.slice_chi(0,chi_width=chi_width)
+                perp = self.slice_chi(90,chi_width=chi_width)
+                return ((para - perp) / (para+perp))
+            elif pol==90:
+                para = self.slice_chi(90,chi_width=chi_width)
+                perp = self.slice_chi(0,chi_width=chi_width)
+                return ((para - perp) / (para+perp))
+            else:
+                warnings.warn('Must select horizontal or vertical polarization')
         elif(calc2d):
-            para_pol = self.select_pol(0)
-            perp_pol = self.select_pol(90)
+            horz_pol = self.select_pol(0)
+            vert_pol = self.select_pol(90)
 
-            para_para = para_pol.slice_chi(0,chi_width=chi_width)
-            para_perp = para_pol.slice_chi(-90,chi_width=chi_width)
+            horz_para = horz_pol.rsoxs.slice_chi(0,chi_width=chi_width)
+            horz_perp = horz_pol.rsoxs.slice_chi(90,chi_width=chi_width)
 
-            perp_perp = perp_pol.slice_chi(-90,chi_width=chi_width)
-            perp_para = perp_pol.slice_chi(0,chi_width=chi_width)
+            vert_perp = vert_pol.rsoxs.slice_chi(90,chi_width=chi_width)
+            vert_para = vert_pol.rsoxs.slice_chi(0,chi_width=chi_width)
 
-            AR_para = ((para_para - para_perp)/(para_para+para_perp))
-            AR_perp = ((perp_perp - perp_para)/(perp_perp+perp_para))
+            AR_para = ((horz_para - horz_perp)/(horz_para+horz_perp))
+            AR_perp = ((vert_perp - vert_para)/(vert_perp+vert_para))
 
             if calc2d_norm_energy is not None:
                 AR_para = AR_para / AR_para.sel(energy=calc2d_norm_energy)
                 AR_perp = AR_perp / AR_perp.sel(energy=calc2d_norm_energy)
 
-            if AR_para < AR_perp or AR_perp < AR_para:
-                warnings.warn('One polarization has a systematically higher/lower AR than the other.  Typically this indicates bad intensity values.',stacklevel=2)
+            # if AR_para < AR_perp or AR_perp < AR_para:
+            #     warnings.warn('One polarization has a systematically higher/lower AR than the other.  Typically this indicates bad intensity values.',stacklevel=2)
 
             if two_AR:
                 return (AR_para,AR_perp)
