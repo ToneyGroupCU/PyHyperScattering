@@ -19,9 +19,8 @@ try:
     from httpx import HTTPStatusError
     import tiled
     import dask
-    from databroker.queries import RawMongo, Key, FullText, Contains, Regex, ScanIDRange
-    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-except:
+    from databroker.queries import RawMongo, Key, FullText, Contains, Regex
+except Exception:
     print(
         "Imports failed.  Are you running on a machine with proper libraries for databroker, tiled, etc.?"
     )
@@ -80,6 +79,10 @@ class SST1RSoXSDB:
             self.c = from_profile("rsoxs", **catalog_kwargs)
         else:
             self.c = catalog
+            if use_chunked_loading:
+                raise SyntaxError('use_chunked_loading is incompatible with externally supplied catalog.  when creating the catalog, pass structure_clients = "dask" as a kwarg.')
+            if len(catalog_kwargs) != 0:
+                raise SyntaxError('catalog_kwargs is incompatible with externally supplied catalog.  pass those kwargs to whoever gave you the catalog you passed in.')
         self.dark_subtract = dark_subtract
         self.dark_pedestal = dark_pedestal
         self.exposure_offset = exposure_offset
@@ -468,7 +471,13 @@ class SST1RSoXSDB:
                 pass
             axes.append(axis)
             scans.append(loaded)
-            label_vals.append(loaded.__getattr__(meta_dim))
+            label_val = loaded.__getattr__(meta_dim)
+            try:
+                if len(label_val)>1 and type(label_val) != str:
+                    label_val = label_val.mean()
+            except TypeError:
+                pass # assume if there is no len, then this is a single value and everything is fine
+            label_vals.append(label_val)
         assert len(axes) == axes.count(
             axes[0]
         ), f"Error: not all loaded data have the same axes.  This is not supported yet.\n {axes}"
@@ -519,32 +528,97 @@ class SST1RSoXSDB:
             )
 
         md = self.loadMd(run)
-        monitors = self.loadMonitors(
-            run, useShutterThinning=useMonitorShutterThinning)
-        if "NEXAFS" in md["start"]["plan_name"]:
-            raise NotImplementedError(
-                f"Scan {md['start']['scan_id']} is a {md['start']['plan_name']} NEXAFS scan.  NEXAFS loading is not yet supported."
-            )
-        elif (
-            "full" in md["start"]["plan_name"]
-            or "short" in md["start"]["plan_name"]
-            or "custom_rsoxs_scan" in md["start"]["plan_name"]
-        ) and dims is None:
-            dims = ["energy"]
-        elif "spiralsearch" in md["start"]["plan_name"] and dims is None:
-            dims = ["sam_x", "sam_y"]
-        elif "count" in md["start"]["plan_name"] and dims is None:
-            dims = ["epoch"]
-        elif dims is None:
-            raise NotImplementedError(
-                f"Cannot infer dimensions for a {md['start']['plan_name']} plan.  If this should be broadly supported, please raise an issue with the expected dimensions on the project GitHub."
-            )
-        # data = run['primary']['data'][md['detector']+'_image']
-        # if self.dark_subtract:
-        #    dark = run['dark']['data'][md['detector']+'_image'].mean('time') #@TODO: change to correct dark indexing
-        #    image = data - dark - self.dark_pedestal
-        # else:
-        #    image = data - self.dark_pedestal
+        
+        monitors = self.loadMonitors(run)
+        
+        if dims is None:
+            if ('NEXAFS' or 'nexafs') in md['start']['plan_name']:
+                raise NotImplementedError(f"Scan {md['start']['scan_id']} is a {md['start']['plan_name']} NEXAFS scan.  NEXAFS loading is not yet supported.") # handled case change in "NEXAFS"
+            elif ('full' in md['start']['plan_name'] or 'short' in md['start']['plan_name'] or 'custom_rsoxs_scan' in md['start']['plan_name']) and dims is None:
+                dims = ['energy']
+            elif 'spiralsearch' in md['start']['plan_name'] and dims is None:
+                dims = ['sam_x','sam_y']
+            elif 'count' in md['start']['plan_name'] and dims is None:
+                dims = ['epoch']
+            else:
+                axes_to_include = []
+                rsd_cutoff = 0.005
+
+                # begin with a list of the things that are primary streams
+                axis_list = list(run['primary']['data'].keys())
+                # next, knock out anything that has 'image', 'fullframe' in it - these aren't axes
+                axis_list = [x for x in axis_list if 'image' not in x]
+                axis_list = [x for x in axis_list if 'fullframe' not in x]
+                axis_list = [x for x in axis_list if 'stats' not in x]
+                axis_list = [x for x in axis_list if 'saturated' not in x]
+                axis_list = [x for x in axis_list if 'under_exposed' not in x]
+                # knock out any known names of scalar counters
+                axis_list = [x for x in axis_list if 'Beamstop' not in x]
+                axis_list = [x for x in axis_list if 'Current' not in x]
+                
+                
+                
+                # now, clean up duplicates.
+                axis_list = [x for x in axis_list if 'setpoint' not in x]
+                # now, figure out what's actually moving.  we use a relative standard deviation to do this.
+                # arbitrary cutoff of 0.5% motion = it moved intentionally.
+                for axis in axis_list:
+                    std = np.std(run["primary"]["data"][axis])
+                    mean = np.mean(run["primary"]["data"][axis])
+                    rsd = std/mean
+                    
+                    if rsd > rsd_cutoff:
+                        axes_to_include.append(axis)
+
+                # next, construct the reverse lookup table - best mapping we can make of key to pyhyper word
+                # we start with the lookup table used by loadMd()
+                reverse_lut =  {v: k for k, v in self.md_lookup.items()}
+                reverse_lut_secondary =  {v: k for k, v in self.md_secondary_lookup.items()}
+                reverse_lut.update(reverse_lut_secondary)
+
+                # here, we broaden the table to make a value that default sources from '_setpoint' actually match on either
+                # the bare value or the readback value.
+                reverse_lut_adds = {}
+                for k in reverse_lut.keys():
+                    if 'setpoint' in k:
+                        reverse_lut_adds[k.replace('_setpoint','')] = reverse_lut[k]
+                        reverse_lut_adds[k.replace('_setpoint','_readback')] = reverse_lut[k]
+                reverse_lut.update(reverse_lut_adds)
+            
+                pyhyper_axes_to_use = []
+                for x in axes_to_include:
+                    try:
+                        pyhyper_axes_to_use.append(reverse_lut[x])
+                    except KeyError:
+                        pyhyper_axes_to_use.append(x)
+                dims = pyhyper_axes_to_use 
+        
+        '''
+        elif dims == None:
+            # use the dim tols to define the dimensions
+            # dims = []
+            # dim_tols = {'en_polarization': 0.5, 'sam_x': 0.05, 'sam_y':0.05, 'en_energy':0.05, 'exposure': 1., 'sam_th': 0.05} # set the amount dims are allowed to change; could make this user-chosen in the future
+            dims = ['en_energy','time'] # I think this always needs to be an axis due to the way that the integrator is set up
+            dim_tols = {'en_polarization': 0.5, 'sam_x': 0.05, 'sam_y':0.05, 'exposure': 1., 'sam_th': 0.05} # set the amount dims are allowed to change; could make this user-chosen in the future
+            if 'spiral' in md['start']['plan_name']:
+                dims = ['energy','time']
+                dim_tols = {'polarization': 0.5, 'sam_x': 0.05, 'sam_y':0.05, 'exposure': 1., 'sam_th': 0.05} # set the amount dims are allowed to change; could make this user-chosen in the future
+            for k in dim_tols.keys():
+                dim = md[k]
+                dim_std = np.std(dim)
+                if dim_std > dim_tols[k]:
+                    dims.append(k)
+        else: # if the user has already specified the dims; user may frequently specify 'energy' or 'polarization', so just changing that so it's readable to access correct metadata (without en_, they are just setpoints)
+            dims = dims
+            for i in range(0,len(dims)):
+                if dims[i] == 'polarization':
+                    dims[i] = 'en_polarization'
+                if dims[i] == 'energy':
+                    dims[i] = 'en_energy'
+            if len(dims) == 0:
+                raise NotImplementedError('You have not entered any dimensions; please enter at least one, or use None rather than an empty list')
+        '''
+
 
         data = run["primary"]["data"][md["detector"] + "_image"]
         if (
@@ -590,7 +664,7 @@ class SST1RSoXSDB:
                     dims_to_join.append(md[dim])
                 dim_names_to_join.append(dim)
             except TypeError:
-                dims_to_join.append(np.ones(run.start["num_points"]) * md[dim])
+                dims_to_join.append([md[dim]] * run.start["num_points"])
                 dim_names_to_join.append(dim)
 
         for key, val in coords.items():
@@ -624,15 +698,14 @@ class SST1RSoXSDB:
                 .assign_coords(system=index)
             )
 
-            if "system_" in monitors.indexes.keys:
+            if "system_" in monitors.indexes.keys():
                 monitors = monitors.drop("system_")
 
-        except Exception:
-            pass
-            # warnings.warn(
-            #     "Error assigning monitor readings to system.  Problem with monitors.  Please check.",
-            #     stacklevel=2,
-            # )
+        except Exception as e:
+            warnings.warn(
+                "Monitor streams loaded successfully, but could not be correlated to images.  Check monitor stream for issues, probable metadata change.",
+                stacklevel=2,
+            )
         retxr.attrs.update(md)
 
         retxr.attrs["exposure"] = (
