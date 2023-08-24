@@ -126,7 +126,7 @@ class SST1RSoXSLoader(FileLoader):
     def read_json(self,jsonfile):
         json_dict = {}
         with open(jsonfile) as f:
-            data = json.load(f)
+            data = [0, json.load(f)]
             meas_time =datetime.datetime.fromtimestamp(data[1]['time'])
             json_dict['sample_name'] = data[1]['sample_name']
         if data[1]['RSoXS_Main_DET'] == 'SAXS':
@@ -150,7 +150,7 @@ class SST1RSoXSLoader(FileLoader):
                 json_dict['beamcenter_y'] = data[1]['RSoXS_SAXS_BCY']
                 json_dict['sdd'] = data[1]['RSoXS_SAXS_SDD']
 
-        elif data[1]['RSoXS_Main_DET'] == 'WAXS':
+        elif (data[1]['RSoXS_Main_DET'] == 'WAXS') | (data[1]['RSoXS_Main_DET'] == 'waxs_det'):
             json_dict['rsoxs_config'] = 'waxs'
             if (meas_time > datetime.datetime(2020,11,16)) and (meas_time < datetime.datetime(2021,1,15)):
                 json_dict['beamcenter_x'] = 400.46
@@ -167,7 +167,7 @@ class SST1RSoXSLoader(FileLoader):
                 json_dict['sdd'] = data[1]['RSoXS_WAXS_SDD']
 
         else:
-            json_dict['rsoxs_config'] == 'unknown'
+            json_dict['rsoxs_config'] = 'unknown'
             warnings.warn('RSoXS_Config is neither SAXS or WAXS. Check json file',stacklevel=2)
 
         if json_dict['sdd'] == None:
