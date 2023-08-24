@@ -33,8 +33,6 @@ class FileLoader():
     def peekAtMd(self,filepath):
         return self.loadSingleImage(filepath,{})
     
-
-
     def loadFileSeries(self,basepath,dims,coords={},file_filter=None,file_filter_regex=None,file_skip=None,md_filter={},quiet=True,output_qxy=False,dest_qx=None,dest_qy=None,output_raw=False,image_slice=None):
         '''
         Load a series into a single xarray.

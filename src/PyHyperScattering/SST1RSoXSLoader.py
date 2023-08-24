@@ -247,7 +247,7 @@ class SST1RSoXSLoader(FileLoader):
         else:
             cwd = pathlib.Path(dirPath)
 
-        json_fname = list(cwd.glob('*.jsonl'))
+        json_fname = list(cwd.glob('*.json'))
         json_dict = self.read_json(json_fname[0])
 
         baseline_fname = list(cwd.glob('*baseline.csv'))
