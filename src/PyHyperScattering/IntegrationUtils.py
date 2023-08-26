@@ -2,7 +2,6 @@ import warnings
 import xarray as xr
 import numpy as np
 import math
-import matplotlib.pyplot as plt
 
 try:
     import holoviews as hv
@@ -16,10 +15,6 @@ except (ModuleNotFoundError,ImportError):
 import pandas as pd
 
 import json
-
-## Set a colormap
-cm = plt.cm.terrain.copy()
-cm.set_bad('purple')
 
 class Check:
     '''
@@ -75,7 +70,7 @@ class Check:
         ax.add_patch(beamcenter)
         ax.add_patch(guide1)
         ax.add_patch(guide2)
-    def checkAll(integrator,img,img_min=1e1,img_max=5e3,img_scaling='log',alpha=1, guide1=50, guide2=150):
+    def checkAll(integrator,img,img_min=1,img_max=10000,img_scaling='log',alpha=1,d_inner=50,d_outer=150):
         '''
             draw the beamcenter and overlay mask on an image
 
@@ -94,16 +89,15 @@ class Check:
             norm=LogNorm(img_min,img_max)
         else:
             norm=Normalize(img_min,img_max)
-        img.plot.imshow(origin='lower', norm=norm, ax=ax, interpolation='antialiased', cmap=cm)
+        img.plot(norm=norm,ax=ax)
         ax.set_aspect(1)
         beamcenter = plt.Circle((integrator.ni_beamcenter_x, integrator.ni_beamcenter_y), 5, color='lawngreen')
-        guide1 = plt.Circle((integrator.ni_beamcenter_x, integrator.ni_beamcenter_y), guide1, color='lawngreen',fill=False)
-        guide2 = plt.Circle((integrator.ni_beamcenter_x, integrator.ni_beamcenter_y), guide2, color='lawngreen',fill=False)
+        guide1 = plt.Circle((integrator.ni_beamcenter_x, integrator.ni_beamcenter_y), d_inner, color='lawngreen',fill=False)
+        guide2 = plt.Circle((integrator.ni_beamcenter_x, integrator.ni_beamcenter_y), d_outer, color='lawngreen',fill=False)
         ax.add_patch(beamcenter)
         ax.add_patch(guide1)
         ax.add_patch(guide2)
         ax.imshow(integrator.mask,origin='lower',alpha=alpha)
-
 class DrawMask:
     '''
     Utility class for interactively drawing a mask in a Jupyter notebook.
@@ -120,21 +114,22 @@ class DrawMask:
 
     '''
     
-    def __init__(self,frame):
+    def __init__(self,frame, cmap='viridis', clim=(5e0, 5e3), width=800, height=700):
         '''
         Construct a DrawMask object
 
         Args:
             frame (xarray): a single data frame with pix_x and pix_y axes
 
-
         '''
+
         if len(frame.shape) > 2:
             warnings.warn('This tool needs a single frame, not a stack!  .sel down to a single frame before starting!',stacklevel=2)
             
-        self.frame=frame
+        self.frame = frame
         
-        self.fig = frame.hvplot(cmap='terrain',clim=(5,5000),logz=True,data_aspect=1)
+        self.fig = frame.hvplot(cmap=cmap, clim=clim, logz=True, data_aspect=1, 
+                                width=width, height=height)
 
         self.poly = hv.Polygons([])
         self.path_annotator = hv.annotate.instance()
@@ -146,17 +141,13 @@ class DrawMask:
 
         Returns: the holoviews object
 
-
-
         '''
         print('Usage: click the "PolyAnnotator" tool at top right.  DOUBLE CLICK to start drawing a masked object, SINGLE CLICK to add a vertex, then DOUBLE CLICK to finish.  Click/drag individual vertex to adjust.')
-        return self.path_annotator(
-                self.fig * self.poly.opts(
-                            width=self.frame.shape[0], 
-                            height=self.frame.shape[1], 
-                            responsive=False), 
-                annotations=['Label'], 
-            vertex_annotations=['Value'])
+        annotator_plot = self.path_annotator(
+                                    self.fig * self.poly.opts(responsive=False), 
+                                    annotations=['Label'], 
+                                    vertex_annotations=['Value'])
+        return annotator_plot.opts(toolbar='left')
 
 
     def save(self,fname):
@@ -184,11 +175,11 @@ class DrawMask:
         '''
         with open(fname,'r') as f:
             strlist = json.load(f)
-        print(strlist)
+        # print(strlist)
         dflist = []
         for item in strlist:
             dflist.append(pd.read_json(item))
-        print(dflist)
+        # print(dflist)
         self.poly = hv.Polygons(dflist)
         
         self.path_annotator(
