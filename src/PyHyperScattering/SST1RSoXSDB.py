@@ -396,7 +396,7 @@ class SST1RSoXSDB:
                               and (outputVariableName == "lab_pol")):
                             pols = scanEntry['primary']['data'][metaDataLabel]
                             singleScanOutput.append(
-                                [pols[0], pols[-1]]
+                                [int(pols[0]), int(pols[-1])]
                             )
                         else:
                             if debugWarnings:
