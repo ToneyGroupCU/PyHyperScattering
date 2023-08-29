@@ -306,9 +306,9 @@ class SST1RSoXSDB:
                 ["bar_spot", "bar_spot", r"catalog.start", "ext_msmt"],
                 ["plan", "plan_name", r"catalog.start", "default"],
                 ["detector", "RSoXS_Main_DET", r"catalog.start", "default"],
-                ["polarization", "pol", r'catalog.start["plan_args"]', "ext_bio"],  # for < 2023C2
-                ["sample_pol", "en_sample_polarization", r'catalog["baseline"]["data"]', "default"],
-                ["lab_pol", "en_polarization", r'catalog["baseline"]["data"]', "default"],
+                ["polarization", "pol", r'catalog.start["plan_args"]', "deprecated"],  # for < 2023C2
+                ["sample_pol", "en_sample_polarization", r'catalog["baseline"]["data"]', "nexafs"],  # useful for nexafs, but slow
+                ["lab_pol", "en_polarization_setpoint", r'catalog["primary"]["data"]', "default"],
                 ["sample_rotation", "angle", r"catalog.start", "ext_msmt"],
                 ["exit_status", "exit_status", r"catalog.stop", "default"],
                 ["num_Images", "primary", r'catalog.stop["num_events"]', "default"],
@@ -390,7 +390,13 @@ class SST1RSoXSDB:
                             )
                         elif metaDataSource == r'catalog["baseline"]["data"]':
                             singleScanOutput.append(
-                                scanEntry['baseline']['data'][metaDataLabel].read().compute()
+                                scanEntry['baseline']['data'][metaDataLabel].read().compute()[0]
+                            )
+                        elif ((metaDataSource == r'catalog["primary"]["data"]')
+                              and (outputVariableName == "lab_pol")):
+                            pols = scanEntry['primary']['data'][metaDataLabel]
+                            singleScanOutput.append(
+                                [pols[0], pols[-1]]
                             )
                         else:
                             if debugWarnings:
