@@ -390,7 +390,7 @@ class SST1RSoXSDB:
                             )
                         elif metaDataSource == r'catalog["baseline"]["data"]':
                             singleScanOutput.append(
-                                scanEntry['baseline']['data'][metaDataLabel].read().compute()[0]
+                                scanEntry['baseline']['data'][metaDataLabel].read()[0]
                             )
                         elif ((metaDataSource == r'catalog["primary"]["data"]')
                               and (outputVariableName == "lab_pol")):
