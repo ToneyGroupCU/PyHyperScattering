@@ -12,6 +12,7 @@ from tqdm.auto import tqdm
 import scipy.ndimage
 import asyncio
 import time
+import copy
 
 try:
     os.environ["TILED_SITE_PROFILES"] = "/nsls2/software/etc/tiled/profiles"
@@ -22,7 +23,8 @@ try:
     from databroker.queries import RawMongo, Key, FullText, Contains, Regex
 except Exception:
     print(
-        "Imports failed.  Are you running on a machine with proper libraries for databroker, tiled, etc.?"
+        "Imports failed.  Are you running on a machine with proper libraries for databroker,"
+        " tiled, etc.?"
     )
 
 import copy
@@ -39,6 +41,19 @@ class SST1RSoXSDB:
     md_loading_is_quick = True
     pix_size_1 = 0.06
     pix_size_2 = 0.06
+
+    md_lookup = {
+        "sam_x": "RSoXS Sample Outboard-Inboard",
+        "sam_y": "RSoXS Sample Up-Down",
+        "sam_z": "RSoXS Sample Downstream-Upstream",
+        "sam_th": "RSoXS Sample Rotation",
+        "polarization": "en_polarization_setpoint",
+        "energy": "en_energy_setpoint",
+        "exposure": "RSoXS Shutter Opening Time (ms)",  # md['detector']+'_cam_acquire_time'
+    }
+    md_secondary_lookup = {
+        "energy": "en_monoen_setpoint",
+    }
 
     def __init__(
         self,
@@ -65,7 +80,8 @@ class SST1RSoXSDB:
         """
         if corr_mode == None:
             warnings.warn(
-                "Correction mode was not set, not performing *any* intensity corrections.  Are you sure this is "
+                "Correction mode was not set, not performing *any* intensity corrections.  Are you"
+                " sure this is "
                 + "right? Set corr_mode to 'none' to suppress this warning.",
                 stacklevel=2,
             )
@@ -80,9 +96,15 @@ class SST1RSoXSDB:
         else:
             self.c = catalog
             if use_chunked_loading:
-                raise SyntaxError('use_chunked_loading is incompatible with externally supplied catalog.  when creating the catalog, pass structure_clients = "dask" as a kwarg.')
+                raise SyntaxError(
+                    "use_chunked_loading is incompatible with externally supplied catalog.  when"
+                    ' creating the catalog, pass structure_clients = "dask" as a kwarg.'
+                )
             if len(catalog_kwargs) != 0:
-                raise SyntaxError('catalog_kwargs is incompatible with externally supplied catalog.  pass those kwargs to whoever gave you the catalog you passed in.')
+                raise SyntaxError(
+                    "catalog_kwargs is incompatible with externally supplied catalog.  pass those"
+                    " kwargs to whoever gave you the catalog you passed in."
+                )
         self.dark_subtract = dark_subtract
         self.dark_pedestal = dark_pedestal
         self.exposure_offset = exposure_offset
@@ -117,7 +139,22 @@ class SST1RSoXSDB:
         q = RawMongo(**kwargs)
         return self.c.search(q)
 
-    def summarize_run(
+    def summarize_run(self, *args, **kwargs):
+        """Deprecated function for searching the bluesky catalog for a run. Replaced by searchCatalog()
+
+        To be removed in PyHyperScattering 1.0.0+.
+        """
+        warnings.warn(
+            (
+                "summarize_run has been renamed to searchCatalog.  This will stop working in"
+                " PyHyperScattering 1.0.0 and later."
+            ),
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.searchCatalog(*args, **kwargs)
+
+    def searchCatalog(
         self,
         outputType: str = "default",
         cycle: str = None,
@@ -143,13 +180,13 @@ class SST1RSoXSDB:
         underlying metadata scheme.
 
         Ex1: All of the carbon,fluorine,or oxygen scans for a single sample series in the most recent cycle:
-            bsCatalogReduced4 = db_loader.summarize_run(sample="bBP_", institution="NIST", cycle = "2022-2", plan="carbon|fluorine|oxygen")
+            bsCatalogReduced4 = db_loader.searchCatalog(sample="bBP_", institution="NIST", cycle = "2022-2", plan="carbon|fluorine|oxygen")
 
         Ex2: Just all of the scan Ids for a particular sample:
-            bsCatalogReduced4 = db_loader.summarize_run(sample="BBP_PFP09A", outputType='scans')
+            bsCatalogReduced4 = db_loader.searchCatalog(sample="BBP_PFP09A", outputType='scans')
 
         Ex3: Complex Search with custom parameters
-            bsCatalogReduced3 = db_loader.summarize_run(['angle', '-1.6', 'numeric'], outputType='all',sample="BBP_", cycle = "2022-2",
+            bsCatalogReduced3 = db_loader.searchCatalog(['angle', '-1.6', 'numeric'], outputType='all',sample="BBP_", cycle = "2022-2",
             institution="NIST",plan="carbon", userOutputs = [["Exposure Multiplier", "exptime", r'catalog.start'], ["Stop
             Time","time",r'catalog.stop']])
 
@@ -184,7 +221,7 @@ class SST1RSoXSDB:
                 Ex2: passing in grazing=[0,'numeric'] would match grazing==0
                 Ex3: create kwargs first, then pass it into the function.
                     kwargs = {'2weird metadata label': "Bob", 'grazing': 0, 'angle':-1.6}
-                    db_loader.summarize_run(sample="BBP_PFP09A", outputType='scans', **kwargs)
+                    db_loader.searchCatalog(sample="BBP_PFP09A", outputType='scans', **kwargs)
             userOutputs (list of lists, optional): Additional metadata to be added to output can be specified as a list of lists. Each
                 sub-list specifies a metadata field as a 3 element list of format:
                 [Output column title (str), Metadata label (str), Metadata Source (raw str)],
@@ -225,7 +262,9 @@ class SST1RSoXSDB:
                 userSearchList.append([userLabel, value[0], value[1]])
             else:  # bad user input
                 raise ValueError(
-                    f"Error parsing a keyword search term, check the format.  Skipped argument: {value} ")
+                    "Error parsing a keyword search term, check the format.  Skipped argument:"
+                    f" {value} "
+                )
 
         # combine the lists of lists
         fullSearchList = defaultSearchDetails + userSearchList
@@ -238,11 +277,11 @@ class SST1RSoXSDB:
         # Iterate through search terms sequentially, reducing the size of the catalog based on successful matches
 
         reducedCatalog = bsCatalog
-        for _, searchSeries in tqdm(df_SearchDet.iterrows(), total=df_SearchDet.shape[0], desc="Running catalog search..."):
-
+        for _, searchSeries in tqdm(
+            df_SearchDet.iterrows(), total=df_SearchDet.shape[0], desc="Running catalog search..."
+        ):
             # Skip arguments with value None, and quits if the catalog was reduced to 0 elements
             if (searchSeries[1] is not None) and (len(reducedCatalog) > 0):
-
                 # For numeric entries, do Key equality
                 if "numeric" in str(searchSeries[2]):
                     reducedCatalog = reducedCatalog.search(
@@ -266,9 +305,7 @@ class SST1RSoXSDB:
                         str(searchSeries[1]) + reg_postfix
 
                     # Search/reduce the catalog
-                    reducedCatalog = reducedCatalog.search(
-                        Regex(searchSeries[0], regexString)
-                    )
+                    reducedCatalog = reducedCatalog.search(Regex(searchSeries[0], regexString))
 
                 # If a match fails, notify the user which search parameter yielded 0 results
                 if len(reducedCatalog) == 0:
@@ -281,7 +318,7 @@ class SST1RSoXSDB:
 
         # Part 2: Build and return output dataframe
 
-        if (outputType == "scans"):
+        if outputType == "scans":
             # Branch 2.1, if only scan IDs needed, build and return a 1-column dataframe
             scan_ids = []
             for scanEntry in tqdm(reducedCatalog.values(), desc="Building scan list"):
@@ -306,9 +343,7 @@ class SST1RSoXSDB:
                 ["bar_spot", "bar_spot", r"catalog.start", "ext_msmt"],
                 ["plan", "plan_name", r"catalog.start", "default"],
                 ["detector", "RSoXS_Main_DET", r"catalog.start", "default"],
-                ["polarization", "pol", r'catalog.start["plan_args"]', "deprecated"],  # for < 2023C2
-                ["sample_pol", "en_sample_polarization", r'catalog["baseline"]["data"]', "nexafs"],  # useful for nexafs, but slow
-                ["lab_pol", "en_polarization_setpoint", r'catalog["primary"]["data"]', "default"],
+                ["polarization", "pol", r'catalog.start["plan_args"]', "default"],
                 ["sample_rotation", "angle", r"catalog.start", "ext_msmt"],
                 ["exit_status", "exit_status", r"catalog.stop", "default"],
                 ["num_Images", "primary", r'catalog.stop["num_events"]', "default"],
@@ -335,7 +370,12 @@ class SST1RSoXSDB:
                     activeOutputLabels.append(userOutEntry[0])
                 else:  # bad user input
                     raise ValueError(
-                        f"Error parsing user-provided output request {userOutEntry}, check the format.", stacklevel=2)
+                        (
+                            f"Error parsing user-provided output request {userOutEntry}, check the"
+                            " format."
+                        ),
+                        stacklevel=2,
+                    )
 
             # Add any user-provided search terms
             for userSearchEntry in userSearchList:
@@ -370,9 +410,10 @@ class SST1RSoXSDB:
                     metaDataSource = outputEntry[2]
 
                     try:  # Add the metadata value depending on where it is located
-                        if metaDataLabel == 'time':
+                        if metaDataLabel == "time":
                             singleScanOutput.append(
-                                datetime.datetime.fromtimestamp(currentCatalogStart['time']))
+                                datetime.datetime.fromtimestamp(currentCatalogStart["time"])
+                            )
                             # see Zen of Python # 9,8 for justification
                         elif metaDataSource == r"catalog.start":
                             singleScanOutput.append(
@@ -401,15 +442,23 @@ class SST1RSoXSDB:
                         else:
                             if debugWarnings:
                                 warnings.warn(
-                                    f'Failed to locate metadata for {outputVariableName} in scan {currentScanID}.',
-                                    stacklevel=2)
+                                    (
+                                        f"Failed to locate metadata for {outputVariableName} in"
+                                        f" scan {currentScanID}."
+                                    ),
+                                    stacklevel=2,
+                                )
                             missesDuringLoad = True
 
                     except (KeyError, TypeError):
                         if debugWarnings:
                             warnings.warn(
-                                f'Failed to locate metadata for {outputVariableName} in scan {currentScanID}.',
-                                stacklevel=2)
+                                (
+                                    f"Failed to locate metadata for {outputVariableName} in scan"
+                                    f" {currentScanID}."
+                                ),
+                                stacklevel=2,
+                            )
                         missesDuringLoad = True
                         singleScanOutput.append("N/A")
 
@@ -419,8 +468,12 @@ class SST1RSoXSDB:
             # Convert to dataframe for export
             if missesDuringLoad:
                 warnings.warn(
-                    f'One or more missing field(s) during this load were replaced with "N/A".  Re-run with debugWarnings=True to see details.',
-                    stacklevel=2)
+                    (
+                        f'One or more missing field(s) during this load were replaced with "N/A". '
+                        f" Re-run with debugWarnings=True to see details."
+                    ),
+                    stacklevel=2,
+                )
             return pd.DataFrame(outputList, columns=activeOutputLabels)
 
     def background(f):
@@ -485,10 +538,10 @@ class SST1RSoXSDB:
             scans.append(loaded)
             label_val = loaded.__getattr__(meta_dim)
             try:
-                if len(label_val)>1 and type(label_val) != str:
+                if len(label_val) > 1 and type(label_val) != str:
                     label_val = label_val.mean()
             except TypeError:
-                pass # assume if there is no len, then this is a single value and everything is fine
+                pass  # assume if there is no len, then this is a single value and everything is fine
             label_vals.append(label_val)
         assert len(axes) == axes.count(
             axes[0]
@@ -540,72 +593,77 @@ class SST1RSoXSDB:
             )
 
         md = self.loadMd(run)
-        
+
         monitors = self.loadMonitors(run)
-        
+
         if dims is None:
-            if ('NEXAFS' or 'nexafs') in md['start']['plan_name']:
-                raise NotImplementedError(f"Scan {md['start']['scan_id']} is a {md['start']['plan_name']} NEXAFS scan.  NEXAFS loading is not yet supported.") # handled case change in "NEXAFS"
-            elif ('full' in md['start']['plan_name'] or 'short' in md['start']['plan_name'] or 'custom_rsoxs_scan' in md['start']['plan_name']) and dims is None:
-                dims = ['energy']
-            elif 'spiralsearch' in md['start']['plan_name'] and dims is None:
-                dims = ['sam_x','sam_y']
-            elif 'count' in md['start']['plan_name'] and dims is None:
-                dims = ['epoch']
+            if ("NEXAFS" or "nexafs") in md["start"]["plan_name"]:
+                raise NotImplementedError(
+                    f"Scan {md['start']['scan_id']} is a {md['start']['plan_name']} NEXAFS scan. "
+                    " NEXAFS loading is not yet supported."
+                )  # handled case change in "NEXAFS"
+            elif (
+                "full" in md["start"]["plan_name"]
+                or "short" in md["start"]["plan_name"]
+                or "custom_rsoxs_scan" in md["start"]["plan_name"]
+            ) and dims is None:
+                dims = ["energy"]
+            elif "spiralsearch" in md["start"]["plan_name"] and dims is None:
+                dims = ["sam_x", "sam_y"]
+            elif "count" in md["start"]["plan_name"] and dims is None:
+                dims = ["epoch"]
             else:
                 axes_to_include = []
                 rsd_cutoff = 0.005
 
                 # begin with a list of the things that are primary streams
-                axis_list = list(run['primary']['data'].keys())
+                axis_list = list(run["primary"]["data"].keys())
                 # next, knock out anything that has 'image', 'fullframe' in it - these aren't axes
-                axis_list = [x for x in axis_list if 'image' not in x]
-                axis_list = [x for x in axis_list if 'fullframe' not in x]
-                axis_list = [x for x in axis_list if 'stats' not in x]
-                axis_list = [x for x in axis_list if 'saturated' not in x]
-                axis_list = [x for x in axis_list if 'under_exposed' not in x]
+                axis_list = [x for x in axis_list if "image" not in x]
+                axis_list = [x for x in axis_list if "fullframe" not in x]
+                axis_list = [x for x in axis_list if "stats" not in x]
+                axis_list = [x for x in axis_list if "saturated" not in x]
+                axis_list = [x for x in axis_list if "under_exposed" not in x]
                 # knock out any known names of scalar counters
-                axis_list = [x for x in axis_list if 'Beamstop' not in x]
-                axis_list = [x for x in axis_list if 'Current' not in x]
-                
-                
-                
+                axis_list = [x for x in axis_list if "Beamstop" not in x]
+                axis_list = [x for x in axis_list if "Current" not in x]
+
                 # now, clean up duplicates.
-                axis_list = [x for x in axis_list if 'setpoint' not in x]
+                axis_list = [x for x in axis_list if "setpoint" not in x]
                 # now, figure out what's actually moving.  we use a relative standard deviation to do this.
                 # arbitrary cutoff of 0.5% motion = it moved intentionally.
                 for axis in axis_list:
                     std = np.std(run["primary"]["data"][axis])
                     mean = np.mean(run["primary"]["data"][axis])
-                    rsd = std/mean
-                    
+                    rsd = std / mean
+
                     if rsd > rsd_cutoff:
                         axes_to_include.append(axis)
 
                 # next, construct the reverse lookup table - best mapping we can make of key to pyhyper word
                 # we start with the lookup table used by loadMd()
-                reverse_lut =  {v: k for k, v in self.md_lookup.items()}
-                reverse_lut_secondary =  {v: k for k, v in self.md_secondary_lookup.items()}
+                reverse_lut = {v: k for k, v in self.md_lookup.items()}
+                reverse_lut_secondary = {v: k for k, v in self.md_secondary_lookup.items()}
                 reverse_lut.update(reverse_lut_secondary)
 
                 # here, we broaden the table to make a value that default sources from '_setpoint' actually match on either
                 # the bare value or the readback value.
                 reverse_lut_adds = {}
                 for k in reverse_lut.keys():
-                    if 'setpoint' in k:
-                        reverse_lut_adds[k.replace('_setpoint','')] = reverse_lut[k]
-                        reverse_lut_adds[k.replace('_setpoint','_readback')] = reverse_lut[k]
+                    if "setpoint" in k:
+                        reverse_lut_adds[k.replace("_setpoint", "")] = reverse_lut[k]
+                        reverse_lut_adds[k.replace("_setpoint", "_readback")] = reverse_lut[k]
                 reverse_lut.update(reverse_lut_adds)
-            
+
                 pyhyper_axes_to_use = []
                 for x in axes_to_include:
                     try:
                         pyhyper_axes_to_use.append(reverse_lut[x])
                     except KeyError:
                         pyhyper_axes_to_use.append(x)
-                dims = pyhyper_axes_to_use 
-        
-        '''
+                dims = pyhyper_axes_to_use
+
+        """
         elif dims == None:
             # use the dim tols to define the dimensions
             # dims = []
@@ -629,8 +687,7 @@ class SST1RSoXSDB:
                     dims[i] = 'en_energy'
             if len(dims) == 0:
                 raise NotImplementedError('You have not entered any dimensions; please enter at least one, or use None rather than an empty list')
-        '''
-
+        """
 
         data = run["primary"]["data"][md["detector"] + "_image"]
         if (
@@ -659,9 +716,7 @@ class SST1RSoXSDB:
             def subtract_dark(img, pedestal=100, darks=None):
                 return img + pedestal - darks[int(img.dark_id.values)]
 
-            data = data.groupby("time").map(
-                subtract_dark, darks=dark, pedestal=self.dark_pedestal
-            )
+            data = data.groupby("time").map(subtract_dark, darks=dark, pedestal=self.dark_pedestal)
 
         dims_to_join = []
         dim_names_to_join = []
@@ -715,7 +770,10 @@ class SST1RSoXSDB:
 
         except Exception as e:
             warnings.warn(
-                "Monitor streams loaded successfully, but could not be correlated to images.  Check monitor stream for issues, probable metadata change.",
+                (
+                    "Monitor streams loaded successfully, but could not be correlated to images. "
+                    " Check monitor stream for issues, probable metadata change."
+                ),
                 stacklevel=2,
             )
         retxr.attrs.update(md)
@@ -810,7 +868,7 @@ class SST1RSoXSDB:
         # At this stage monitors has dimension time and all streams as data variables
         # the time dimension inherited all time values from all streams
         # the data variables (Mesh current, sample current etc.) are all sparse, with lots of nans
-        
+
         # if there are no monitors, return an empty xarray Dataset
         if monitors is None:
             return xr.Dataset()
@@ -826,16 +884,9 @@ class SST1RSoXSDB:
                 try:
                     primary_time = entry.primary.data["time"].values
                 except AttributeError:
-                    if (
-                        type(entry.primary.data["time"])
-                        == tiled.client.array.DaskArrayClient
-                    ):
-                        primary_time = entry.primary.data["time"].read(
-                        ).compute()
-                    elif (
-                        type(entry.primary.data["time"])
-                        == tiled.client.array.ArrayClient
-                    ):
+                    if type(entry.primary.data["time"]) == tiled.client.array.DaskArrayClient:
+                        primary_time = entry.primary.data["time"].read().compute()
+                    elif type(entry.primary.data["time"]) == tiled.client.array.ArrayClient:
                         primary_time = entry.primary.data["time"].read()
 
                 # If we want to exclude values for when the shutter was opening or closing
@@ -843,14 +894,10 @@ class SST1RSoXSDB:
                 if useShutterThinning:
                     # Create new data variable to hold shutter toggle values that are thinned
                     # Shutter Toggle stream is 1 when open (or opening) and 0 when closed (or closing)
-                    monitors["RSoXS Shutter Toggle_thinned"] = monitors[
-                        "RSoXS Shutter Toggle"
-                    ]
+                    monitors["RSoXS Shutter Toggle_thinned"] = monitors["RSoXS Shutter Toggle"]
 
                     # Perform thinning to remove edge cases where shutter may be partially open or closed
-                    monitors[
-                        "RSoXS Shutter Toggle_thinned"
-                    ].values = scipy.ndimage.binary_erosion(
+                    monitors["RSoXS Shutter Toggle_thinned"].values = scipy.ndimage.binary_erosion(
                         monitors["RSoXS Shutter Toggle"].values,
                         iterations=n_thinning_iters,
                         border_value=0,
@@ -858,9 +905,9 @@ class SST1RSoXSDB:
 
                     # Filter monitors to only include timepoints where shutter was open (as determined by thinning)
                     # Drop any remaining missing values along the time axis
-                    monitors = monitors.where(
-                        monitors["RSoXS Shutter Toggle_thinned"] > 0
-                    ).dropna("time")
+                    monitors = monitors.where(monitors["RSoXS Shutter Toggle_thinned"] > 0).dropna(
+                        "time"
+                    )
 
                 # Bin the indexes in 'time' based on the intervales between timepoints in 'primary_time' and evaluate their mean
                 # Then rename the 'time_bin' dimension that results to 'time'
@@ -882,7 +929,11 @@ class SST1RSoXSDB:
             except Exception as e:
                 # raise e # for testing
                 warnings.warn(
-                    "Error while time-integrating monitors onto images.  Usually, this indicates a problem with the monitors, this is a critical error if doing normalization otherwise fine to ignore.",
+                    (
+                        "Error while time-integrating monitors onto images.  Usually, this"
+                        " indicates a problem with the monitors, this is a critical error if doing"
+                        " normalization otherwise fine to ignore."
+                    ),
                     stacklevel=2,
                 )
         return monitors
@@ -920,9 +971,7 @@ class SST1RSoXSDB:
                 meas_time < datetime.datetime(2022, 7, 7)
             ):
                 # these params determined by Camille from Igor
-                md[
-                    "beamcenter_x"
-                ] = 498  # not the best estimate; I didn't have great data
+                md["beamcenter_x"] = 498  # not the best estimate; I didn't have great data
                 md["beamcenter_y"] = 498
                 # GUESS; SOMEONE SHOULD CONFIRM WITH A BCP MAYBE??
                 md["sdd"] = 512.12
@@ -954,7 +1003,10 @@ class SST1RSoXSDB:
         else:
             md["rsoxs_config"] = "unknown"
             warnings.warn(
-                f'RSoXS_Config is neither SAXS or WAXS. Looks to be {start["RSoXS_Config"]}.  Might want to check that out.',
+                (
+                    f'RSoXS_Config is neither SAXS or WAXS. Looks to be {start["RSoXS_Config"]}. '
+                    " Might want to check that out."
+                ),
                 stacklevel=2,
             )
 
@@ -963,9 +1015,7 @@ class SST1RSoXSDB:
         elif md["rsoxs_config"] == "waxs":
             md["detector"] = "Wide Angle CCD Detector"
         else:
-            warnings.warn(
-                f"Cannot auto-hint detector type without RSoXS config.", stacklevel=2
-            )
+            warnings.warn(f"Cannot auto-hint detector type without RSoXS config.", stacklevel=2)
 
         # items coming from baseline
         baseline = run["baseline"]["data"]
@@ -975,21 +1025,27 @@ class SST1RSoXSDB:
             primary = run["primary"]["data"]
         except (KeyError, HTTPStatusError):
             raise Exception(
-                "No primary stream --> probably you caught run before image was written.  Try again."
+        #         "No primary stream --> probably you caught run before image was written.  Try again."
+        #     )
+        # md_lookup = {
+        #     "sam_x": "RSoXS Sample Outboard-Inboard",
+        #     "sam_y": "RSoXS Sample Up-Down",
+        #     "sam_z": "RSoXS Sample Downstream-Upstream",
+        #     "sam_th": "RSoXS Sample Rotation",
+        #     "polarization": "en_polarization_setpoint",
+        #     "energy": "en_energy_setpoint",
+        #     # md['detector']+'_cam_acquire_time'
+        #     "exposure": "RSoXS Shutter Opening Time (ms)",
+        # }
+        # md_secondary_lookup = {
+        #     "energy": "en_monoen_setpoint",
+        # }
+                "No primary stream --> probably you caught run before image was written.  Try"
+                " again."
             )
-        md_lookup = {
-            "sam_x": "RSoXS Sample Outboard-Inboard",
-            "sam_y": "RSoXS Sample Up-Down",
-            "sam_z": "RSoXS Sample Downstream-Upstream",
-            "sam_th": "RSoXS Sample Rotation",
-            "polarization": "en_polarization_setpoint",
-            "energy": "en_energy_setpoint",
-            # md['detector']+'_cam_acquire_time'
-            "exposure": "RSoXS Shutter Opening Time (ms)",
-        }
-        md_secondary_lookup = {
-            "energy": "en_monoen_setpoint",
-        }
+
+        md_lookup = copy.deepcopy(self.md_lookup)
+        md_secondary_lookup = copy.deepcopy(self.md_secondary_lookup)
 
         for key in primary.keys():
             if key not in md_lookup.values():
@@ -1011,7 +1067,11 @@ class SST1RSoXSDB:
                     md[phs] = blval.mean().round(4)
                     if blval.var() > 0:
                         warnings.warn(
-                            f"While loading {rsoxs} to infill metadata entry for {phs}, found beginning and end values unequal: {baseline[rsoxs]}.  It is possible something is messed up.",
+                            (
+                                f"While loading {rsoxs} to infill metadata entry for {phs}, found"
+                                f" beginning and end values unequal: {baseline[rsoxs]}.  It is"
+                                " possible something is messed up."
+                            ),
                             stacklevel=2,
                         )
                 except (KeyError, HTTPStatusError):
@@ -1028,12 +1088,20 @@ class SST1RSoXSDB:
                             md[phs] = blval.mean().round(4)
                             if blval.var() > 0:
                                 warnings.warn(
-                                    f"While loading {md_secondary_lookup[phs]} to infill metadata entry for {phs}, found beginning and end values unequal: {baseline[rsoxs]}.  It is possible something is messed up.",
+                                    (
+                                        f"While loading {md_secondary_lookup[phs]} to infill"
+                                        f" metadata entry for {phs}, found beginning and end"
+                                        f" values unequal: {baseline[rsoxs]}.  It is possible"
+                                        " something is messed up."
+                                    ),
                                     stacklevel=2,
                                 )
                         except (KeyError, HTTPStatusError):
                             warnings.warn(
-                                f"Could not find {rsoxs} in either baseline or primary.  Needed to infill value {phs}.  Setting to None.",
+                                (
+                                    f"Could not find {rsoxs} in either baseline or primary. "
+                                    f" Needed to infill value {phs}.  Setting to None."
+                                ),
                                 stacklevel=2,
                             )
                             md[phs] = None
@@ -1124,11 +1192,7 @@ class SST1RSoXSDB:
         # img = (img-darkimg+self.dark_pedestal)/corr
         if return_q:
             qpx = (
-                2
-                * np.pi
-                * 60e-6
-                / (headerdict["sdd"] / 1000)
-                / (headerdict["wavelength"] * 1e10)
+                2 * np.pi * 60e-6 / (headerdict["sdd"] / 1000) / (headerdict["wavelength"] * 1e10)
             )
             qx = (np.arange(1, img.size[0] + 1) -
                   headerdict["beamcenter_x"]) * qpx
