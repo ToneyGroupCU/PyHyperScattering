@@ -16,7 +16,7 @@ import copy
 
 try:
     os.environ["TILED_SITE_PROFILES"] = "/nsls2/software/etc/tiled/profiles"
-    from tiled.client import from_profile
+    from tiled.client import from_profile,from_uri
     from httpx import HTTPStatusError
     import tiled
     import dask
@@ -66,6 +66,7 @@ class SST1RSoXSDB:
         catalog_kwargs={},
         use_precise_positions=False,
         use_chunked_loading=False,
+        suppress_time_dimension=True,
     ):
         """
         Args:
@@ -77,6 +78,7 @@ class SST1RSoXSDB:
             catalog_kwargs (dict): kwargs to be passed to a from_profile catalog generation script.  For example, you can ask for Dask arrays here.
             use_precise_positions (bool): if False, rounds sam_x and sam_y to 1 digit.  If True, keeps default rounding (4 digits).  Needed for spiral scans to work with readback positions.
             use_chunked_loading (bool): if True, returns Dask backed arrays for further Dask processing.  if false, behaves in conventional Numpy-backed way
+            suppress_time_dimension (bool): if True, time is never a dimension that you want in your data and will be dropped (default).  if False, time will be a dimension in almost every scan.
         """
         if corr_mode == None:
             warnings.warn(
@@ -92,7 +94,11 @@ class SST1RSoXSDB:
             catalog_kwargs["structure_clients"] = "dask"
         self.use_chunked_loading = use_chunked_loading
         if catalog is None:
-            self.c = from_profile("rsoxs", **catalog_kwargs)
+            try:
+                self.c = from_profile("rsoxs", **catalog_kwargs)
+            except tiled.profiles.ProfileNotFound:
+                print('could not directly connect to Tiled using a system profile.\n  Making network connection.\n  Enter your BNL credentials now or pass an api key like catalog_kwargs={"api_key":"..."}.')
+                self.c = from_uri('https://tiled.nsls2.bnl.gov',**catalog_kwargs)['rsoxs']['raw']
         else:
             self.c = catalog
             if use_chunked_loading:
@@ -109,6 +115,7 @@ class SST1RSoXSDB:
         self.dark_pedestal = dark_pedestal
         self.exposure_offset = exposure_offset
         self.use_precise_positions = use_precise_positions
+        self.suppress_time_dimension = suppress_time_dimension
 
     # def loadFileSeries(self,basepath):
     #     try:
@@ -283,9 +290,9 @@ class SST1RSoXSDB:
             # Skip arguments with value None, and quits if the catalog was reduced to 0 elements
             if (searchSeries[1] is not None) and (len(reducedCatalog) > 0):
                 # For numeric entries, do Key equality
-                if "numeric" in str(searchSeries[2]):
+                if "numeric" in str(searchSeries.iloc[2]):
                     reducedCatalog = reducedCatalog.search(
-                        Key(searchSeries[0]) == float(searchSeries[1])
+                        Key(searchSeries.iloc[0]) == float(searchSeries.iloc[1])
                     )
 
                 else:  # Build regex search string
@@ -295,17 +302,16 @@ class SST1RSoXSDB:
                     # Regex cheatsheet:
                     # (?i) is case insensitive
                     # ^_$ forces exact match to _, ^ anchors the start, $ anchors the end
-                    if "case-insensitive" in str(searchSeries[2]):
+                    if "case-insensitive" in str(searchSeries.iloc[2]):
                         reg_prefix += "(?i)"
-                    if "exact" in searchSeries[2]:
+                    if "exact" in searchSeries.iloc[2]:
                         reg_prefix += "^"
                         reg_postfix += "$"
 
-                    regexString = reg_prefix + \
-                        str(searchSeries[1]) + reg_postfix
+                    regexString = reg_prefix + str(searchSeries.iloc[1]) + reg_postfix
 
                     # Search/reduce the catalog
-                    reducedCatalog = reducedCatalog.search(Regex(searchSeries[0], regexString))
+                    reducedCatalog = reducedCatalog.search(Regex(searchSeries.iloc[0], regexString))
 
                 # If a match fails, notify the user which search parameter yielded 0 results
                 if len(reducedCatalog) == 0:
@@ -577,11 +583,11 @@ class SST1RSoXSDB:
             raw (xarray): raw xarray containing your scan in PyHyper-compliant format
 
         """
-        if type(run) is int:
+        if isinstance(run,int):
             run = self.c[run]
-        elif type(run) is pd.DataFrame:
+        elif isinstance(run,pd.DataFrame):
             run = list(run.scan_id)
-        if type(run) is list:
+        if isinstance(run,list):
             return self.loadSeries(
                 run,
                 "sample_name",
@@ -615,18 +621,23 @@ class SST1RSoXSDB:
             else:
                 axes_to_include = []
                 rsd_cutoff = 0.005
-
+            
                 # begin with a list of the things that are primary streams
                 axis_list = list(run["primary"]["data"].keys())
+                
                 # next, knock out anything that has 'image', 'fullframe' in it - these aren't axes
                 axis_list = [x for x in axis_list if "image" not in x]
                 axis_list = [x for x in axis_list if "fullframe" not in x]
                 axis_list = [x for x in axis_list if "stats" not in x]
                 axis_list = [x for x in axis_list if "saturated" not in x]
                 axis_list = [x for x in axis_list if "under_exposed" not in x]
+                
                 # knock out any known names of scalar counters
                 axis_list = [x for x in axis_list if "Beamstop" not in x]
                 axis_list = [x for x in axis_list if "Current" not in x]
+
+                if self.suppress_time_dimension:
+                    axis_list = [x for x in axis_list if x != "time"]
 
                 # now, clean up duplicates.
                 axis_list = [x for x in axis_list if "setpoint" not in x]
@@ -634,11 +645,15 @@ class SST1RSoXSDB:
                 # arbitrary cutoff of 0.5% motion = it moved intentionally.
                 for axis in axis_list:
                     std = np.std(run["primary"]["data"][axis])
-                    mean = np.mean(run["primary"]["data"][axis])
-                    rsd = std / mean
-
+                    motion = np.abs(np.max(run["primary"]["data"][axis])-np.min(run["primary"]["data"][axis]))
+                    if motion == 0:
+                        rsd = 0
+                    else:
+                        rsd = std / motion
+                    #print(f'Evaluating {axis} for inclusion as a dimension with rsd {rsd}...')
                     if rsd > rsd_cutoff:
                         axes_to_include.append(axis)
+                        #print(f'    --> it was included')
 
                 # next, construct the reverse lookup table - best mapping we can make of key to pyhyper word
                 # we start with the lookup table used by loadMd()
@@ -690,15 +705,11 @@ class SST1RSoXSDB:
         """
 
         data = run["primary"]["data"][md["detector"] + "_image"]
-        if (
-            type(data) == tiled.client.array.ArrayClient
-            or type(data) == tiled.client.array.DaskArrayClient
-        ):
+        if isinstance(data,tiled.client.array.ArrayClient):
             data = run["primary"]["data"].read()[md["detector"] + "_image"]
-        elif type(data) == tiled.client.array.DaskArrayClient:
-            data = xr.DataArray(
-                data.read(), dims=data.dims
-            )  # xxx hack!  Really should use tiled structure_clients xarraydaskclient here.
+        elif isinstance(data,tiled.client.array.DaskArrayClient):
+            data = run["primary"]["data"].read()[md["detector"] + "_image"]
+        
         data = data.astype(int)  # convert from uint to handle dark subtraction
 
         if self.dark_subtract:
@@ -716,7 +727,7 @@ class SST1RSoXSDB:
             def subtract_dark(img, pedestal=100, darks=None):
                 return img + pedestal - darks[int(img.dark_id.values)]
 
-            data = data.groupby("time").map(subtract_dark, darks=dark, pedestal=self.dark_pedestal)
+            data = data.groupby("time",squeeze=False).map(subtract_dark, darks=dark, pedestal=self.dark_pedestal)
 
         dims_to_join = []
         dim_names_to_join = []
@@ -744,11 +755,12 @@ class SST1RSoXSDB:
         if len(index) != len(data["time"]):
             index = index[: len(data["time"])]
         actual_exposure = md["exposure"] * len(data.dim_0)
+        mindex_coords = xr.Coordinates.from_pandas_multiindex(index, 'system')
         retxr = (
             data.sum("dim_0")
             .rename({"dim_1": "pix_y", "dim_2": "pix_x"})
             .rename({"time": "system"})
-            .assign_coords(system=index)
+            .assign_coords(mindex_coords)
         )  # ,md['detector']+'_image':'intensity'})
 
         # this is needed for holoviews compatibility, hopefully does not break other features.
@@ -786,11 +798,10 @@ class SST1RSoXSDB:
         if self.corr_mode == "i0":
             retxr = retxr / monitors["RSoXS Au Mesh Current"]
         elif self.corr_mode != "none":
-            pass
-            # warnings.warn(
-            #     "corrections other than none are not supported at the moment",
-            #     stacklevel=2,
-            # )
+            warnings.warn(
+                "corrections other than none or i0 are not supported at the moment",
+                stacklevel=2,
+            )
 
         retxr.attrs.update(frozen_attrs)
 
