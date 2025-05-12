@@ -7,8 +7,6 @@ from pyFAI.integrator.azimuthal import AzimuthalIntegrator
 from pyFAI.io.ponifile import PoniFile
 from PyHyperScattering.PFGeneralIntegrator import PFGeneralIntegrator
 
-## need to define the output space
-
 class PFFIGeneralIntegrator(PFGeneralIntegrator):
     """
     Integrator for GIWAXS/Fiber data using pyFAI's FiberIntegrator.
@@ -16,8 +14,26 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
     Inherits from PFGeneralIntegrator for shared functionality (mask, geometry).
     Provides multiple integration modes (2D scattering, 1D cuts, exit angles, polar).
     All momentum-transfer axes are expressed in reciprocal angstroms (1/Å).
-    """
 
+    Parameters
+    ----------
+    sample_orientation : int, default 1
+        Fiber orientation code following EXIF standard.
+    incident_angle : float, default 0.12
+        Grazing-incidence angle in degrees (converted to radians).
+    tilt_angle : float, default 0.0
+        Sample tilt angle in degrees (converted to radians).
+    npt_ip : int, default None
+        Number of integration points along in-plane (q_ip).
+    npt_oop : int, default None
+        Number of integration points along out-of-plane (q_oop).
+    split_pixels : bool, default True
+        If True, use pixel-splitting method for integration; if False, disable splitting (method=None).
+    rotate_input : bool, default False
+        If True, rotates input image by 90° (swap pix_x, pix_y) before integration.
+    **kwargs : dict
+        Additional params for PFGeneralIntegrator (dist, poni1/2, rot1/2/3, pixel1/2, wavelength).
+    """
     def __init__(
         self,
         sample_orientation: int = 1,
@@ -25,32 +41,22 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         tilt_angle: float = 0.0,
         npt_ip: int = None,
         npt_oop: int = None,
+        split_pixels: bool = False,
+        rotate_input: bool = False,
         **kwargs
     ):
-        """
-        Parameters
-        ----------
-        sample_orientation : int, default 1
-            Fiber orientation code following EXIF standard (1=normal, 2-8 other rotations).
-        incident_angle : float, default 0.12
-            Psi angle: grazing-incidence angle towards the beam in degrees. Gets converted to radians for pyFAI.
-        tilt_angle : float, default 0.0
-            Chi angle: sample tilt orthogonal to beam in degrees. Gets converted to radians for pyFAI.
-        npt_ip : int, default 500
-            Number of integration points along the in-plane (q_ip) axis.
-        npt_oop : int, default 500
-            Number of integration points along the out-of-plane (q_oop) axis.
-        **kwargs : dict
-            Additional parameters passed to PFGeneralIntegrator (dist, poni1/2, rot1/2/3, pixel1/2, wavelength).
-        """
         self.sample_orientation = sample_orientation
         self._incident_angle = None
         self._tilt_angle = None
         self.incident_angle = incident_angle
-        self.tilt_angle     = tilt_angle
+        self.tilt_angle = tilt_angle
 
         self.npt_ip = npt_ip
         self.npt_oop = npt_oop
+        self.rotate_input = rotate_input
+        self.split_pixels = split_pixels
+
+        # should we define the output space or integration method?
         super().__init__(**kwargs)
 
     def recreateIntegrator(self):
@@ -68,7 +74,6 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
             detector=None
         )
 
-    # ensure any assignment is treated as degrees → radians
     @property
     def incident_angle(self):
         """Grazing-incidence angle in radians."""
@@ -81,7 +86,7 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
 
     @property
     def tilt_angle(self):
-        """Tilt (chi) angle in radians."""
+        """Tilt angle in radians."""
         return self._tilt_angle
 
     @tilt_angle.setter
@@ -93,27 +98,31 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         """
         Perform 2D grazing-incidence integration on a single detector image.
 
-        Transforms pixel intensities to q_oop (vertical, out-of-plane) vs. q_ip (horizontal, in-plane).
-        All units are in reciprocal angstroms (1/Å).
-
-        Parameters
-        ----------
-        da : xarray.DataArray
-            Raw detector image. Must have dims ('pix_y','pix_x') or a stacked axis plus those.
-
-        Returns
-        -------
-        xarray.DataArray
-            2D scattering intensity with dims ('qoop','qip') and a stacked coordinate if present.
+        Transforms pixel intensities to q_oop vs. q_ip.
         """
+        # raw image array
         img = np.squeeze(da.values) if da.ndim > 2 else da.values
+        # original detector dims
+        try:
+            orig_py = da.sizes["pix_y"]
+            orig_px = da.sizes["pix_x"]
+        except KeyError:
+            raise ValueError("DataArray must have 'pix_y' and 'pix_x' dims.")
 
+        # rotate input if requested
+        if self.rotate_input:
+            img = np.rot90(img, k=1)
+            if self.mask is not None:
+                self.mask = np.rot90(self.mask, k=1)
+
+        # mask setup
         if self.mask is None:
             warnings.warn(f"No mask defined, creating empty mask of shape {img.shape}", stacklevel=2)
             self.mask = np.zeros_like(img, dtype=bool)
         if self.mask.shape != img.shape:
             raise ValueError(f"Mask shape {self.mask.shape} does not match image shape {img.shape}")
 
+        # stacked dim
         stack_dims = [d for d in da.dims if d not in ("pix_x", "pix_y")]
         if stack_dims:
             stack_dim = stack_dims[0]
@@ -121,19 +130,15 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         else:
             stack_dim, coords = None, None
 
-        # Before calling integrate2d_grazing_incidence:
+        # infer integration grid
         if self.npt_ip is None:
-            try:
-                self.npt_ip = da.sizes["pix_x"]
-            except KeyError:
-                raise ValueError("No 'pix_x' dimension found on DataArray to infer npt_ip")
+            self.npt_ip = orig_py if self.rotate_input else orig_px
         if self.npt_oop is None:
-            try:
-                self.npt_oop = da.sizes["pix_y"]
-            except KeyError:
-                raise ValueError("No 'pix_y' dimension found on DataArray to infer npt_oop")
+            self.npt_oop = orig_px if self.rotate_input else orig_py
 
+        # integration
         print(f"Incidence Angle (rad): {self.incident_angle}")
+        method = ("bbox", "csr", "cython") if self.split_pixels else 'no'
         result = self.integrator.integrate2d_grazing_incidence(
             data=img,
             unit_ip="qip_A^-1",
@@ -143,15 +148,17 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
             mask=self.mask,
             sample_orientation=self.sample_orientation,
             incident_angle=self.incident_angle,
-            tilt_angle=self.tilt_angle
+            tilt_angle=self.tilt_angle,
+            method=method
         )
 
+        # wrap into DataArray
         out_da = xr.DataArray(
             data=result.intensity,
             dims=("qoop", "qip"),
             coords={
                 "qoop": ("qoop", result.azimuthal, {"units": "1/Å"}),
-                "qip": ("qip",     result.radial,    {"units": "1/Å"}),
+                "qip":  ("qip",   result.radial,    {"units": "1/Å"}),
             },
             attrs=da.attrs
         )
@@ -163,48 +170,6 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         return out_da
 
     ### Methods to potentially add into the integrateSingleImage workflow provided user options for PFFI integrator.
-    def integrate1d(self, da: xr.DataArray, vertical_integration: bool = True) -> xr.DataArray:
-        """
-        Perform 1D grazing-incidence integration (line cut).
-
-        Chooses between q_ip (vertical integration) or q_oop (horizontal integration).
-
-        Parameters
-        ----------
-        da : xarray.DataArray
-            Input image or 2D integrated DataArray.
-        vertical_integration : bool, default True
-            If True, integrate along q_oop to get intensity vs q_ip; else along q_ip to get vs q_oop.
-
-        Returns
-        -------
-        xarray.DataArray
-            1D intensity vs 'qip' or 'qoop' with units '1/Å'.
-        """
-        img = np.squeeze(da.values)
-        result = self.integrator.integrate1d_grazing_incidence(
-            data=img,
-            unit_ip="qip_A^-1",
-            unit_oop="qoop_A^-1",
-            npt_ip=self.npt_ip,
-            npt_oop=self.npt_oop,
-            vertical_integration=vertical_integration,
-            mask=self.mask,
-            sample_orientation=self.sample_orientation,
-            incident_angle=self.incident_angle,
-            tilt_angle=self.tilt_angle
-        )
-        if vertical_integration:
-            axis, coord = "qip", result.ip
-        else:
-            axis, coord = "qoop", result.oop
-
-        return xr.DataArray(
-            data=result.intensity,
-            dims=(axis,),
-            coords={axis: (axis, coord, {"units": "1/Å"})},
-            attrs=da.attrs
-        )
 
     def integrate2d_exitangles(self, da: xr.DataArray) -> xr.DataArray:
         """
@@ -282,6 +247,49 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
             attrs=da.attrs
         )
 
+    def integrate1d(self, da: xr.DataArray, vertical_integration: bool = True) -> xr.DataArray:
+        """
+        Perform 1D grazing-incidence integration (line cut).
+
+        Chooses between q_ip (vertical integration) or q_oop (horizontal integration).
+
+        Parameters
+        ----------
+        da : xarray.DataArray
+            Input image or 2D integrated DataArray.
+        vertical_integration : bool, default True
+            If True, integrate along q_oop to get intensity vs q_ip; else along q_ip to get vs q_oop.
+
+        Returns
+        -------
+        xarray.DataArray
+            1D intensity vs 'qip' or 'qoop' with units '1/Å'.
+        """
+        img = np.squeeze(da.values)
+        result = self.integrator.integrate1d_grazing_incidence(
+            data=img,
+            unit_ip="qip_A^-1",
+            unit_oop="qoop_A^-1",
+            npt_ip=self.npt_ip,
+            npt_oop=self.npt_oop,
+            vertical_integration=vertical_integration,
+            mask=self.mask,
+            sample_orientation=self.sample_orientation,
+            incident_angle=self.incident_angle,
+            tilt_angle=self.tilt_angle
+        )
+        if vertical_integration:
+            axis, coord = "qip", result.ip
+        else:
+            axis, coord = "qoop", result.oop
+
+        return xr.DataArray(
+            data=result.intensity,
+            dims=(axis,),
+            coords={axis: (axis, coord, {"units": "1/Å"})},
+            attrs=da.attrs
+        )
+    
     def __str__(self) -> str:
         return (
             f"FiberIntegrator SDD={self.dist} m, sample_orientation={self.sample_orientation}, "
