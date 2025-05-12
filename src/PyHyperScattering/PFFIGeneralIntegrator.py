@@ -94,8 +94,8 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
 
         result = self.integrator.integrate2d_grazing_incidence(
             data=img,
-            unit_ip="1/Å",
-            unit_oop="1/Å",
+            unit_ip="qip_A^-1",
+            unit_oop="qoop_A^-1",
             npt_ip=self.npt_ip,
             npt_oop=self.npt_oop,
             mask=self.mask,
@@ -141,8 +141,8 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         img = np.squeeze(da.values)
         result = self.integrator.integrate1d_grazing_incidence(
             data=img,
-            unit_ip="1/Å",
-            unit_oop="1/Å",
+            unit_ip="qip_A^-1",
+            unit_oop="qoop_A^-1",
             npt_ip=self.npt_ip,
             npt_oop=self.npt_oop,
             vertical_integration=vertical_integration,
@@ -225,7 +225,7 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
             incident_angle=self.incident_angle,
             tilt_angle=self.tilt_angle,
             polar_degrees=polar_degrees,
-            radial_unit="1/Å",
+            radial_unit="A^-1",
             mask=self.mask
         )
         angle_units = "deg" if polar_degrees else "rad"
