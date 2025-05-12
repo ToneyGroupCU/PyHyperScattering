@@ -259,3 +259,4 @@ class CMSGIWAXS:
             integ_DS[f'{DA.scan_id}'] = integ_DA
 
         return raw_DS, integ_DS
+
