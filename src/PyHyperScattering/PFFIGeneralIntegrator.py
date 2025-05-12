@@ -33,9 +33,9 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         sample_orientation : int, default 1
             Fiber orientation code following EXIF standard (1=normal, 2-8 other rotations).
         incident_angle : float, default 0.12
-            Psi angle: grazing-incidence angle towards the beam in radians.
+            Psi angle: grazing-incidence angle towards the beam in degrees. Gets converted to radians for pyFAI.
         tilt_angle : float, default 0.0
-            Chi angle: sample tilt orthogonal to beam in radians.
+            Chi angle: sample tilt orthogonal to beam in degrees. Gets converted to radians for pyFAI.
         npt_ip : int, default 500
             Number of integration points along the in-plane (q_ip) axis.
         npt_oop : int, default 500
@@ -44,8 +44,11 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
             Additional parameters passed to PFGeneralIntegrator (dist, poni1/2, rot1/2/3, pixel1/2, wavelength).
         """
         self.sample_orientation = sample_orientation
+        self._incident_angle = None
+        self._tilt_angle = None
         self.incident_angle = incident_angle
-        self.tilt_angle = tilt_angle
+        self.tilt_angle     = tilt_angle
+
         self.npt_ip = npt_ip
         self.npt_oop = npt_oop
         super().__init__(**kwargs)
@@ -64,6 +67,27 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
             wavelength=self.wavelength,
             detector=None
         )
+
+    # ensure any assignment is treated as degrees → radians
+    @property
+    def incident_angle(self):
+        """Grazing-incidence angle in radians."""
+        return self._incident_angle
+
+    @incident_angle.setter
+    def incident_angle(self, angle_deg: float):
+        """Accepts angle in degrees, stores in radians."""
+        self._incident_angle = np.deg2rad(angle_deg)
+
+    @property
+    def tilt_angle(self):
+        """Tilt (chi) angle in radians."""
+        return self._tilt_angle
+
+    @tilt_angle.setter
+    def tilt_angle(self, angle_deg: float):
+        """Accepts angle in degrees, stores in radians."""
+        self._tilt_angle = np.deg2rad(angle_deg)
 
     def integrateSingleImage(self, da: xr.DataArray) -> xr.DataArray:
         """
@@ -109,6 +133,7 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
             except KeyError:
                 raise ValueError("No 'pix_y' dimension found on DataArray to infer npt_oop")
 
+        print(f"Incidence Angle (rad): {self.incident_angle}")
         result = self.integrator.integrate2d_grazing_incidence(
             data=img,
             unit_ip="qip_A^-1",
