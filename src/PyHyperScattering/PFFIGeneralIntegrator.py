@@ -1,6 +1,7 @@
 import xarray as xr
 import numpy as np
 import warnings
+from collections import deque
 from pyFAI.integrator.fiber import FiberIntegrator
 from pyFAI.units import get_unit_fiber
 from pyFAI.integrator.azimuthal import AzimuthalIntegrator
@@ -94,6 +95,54 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         """Accepts angle in degrees, stores in radians."""
         self._tilt_angle = np.deg2rad(angle_deg)
 
+    def _generate_secondary_mask(self, intensity: np.ndarray) -> np.ndarray:
+        """
+        Generate a refined mask after pixel splitting:
+        1. Mask all pixels where intensity <= 0.
+        2. Unmask pixels whose left&right or up&down neighbors are both > 0.
+        3. Remove connected components of masked pixels with size <= 4.
+        Returns boolean array of same shape, True for masked pixels.
+        """
+        H, W = intensity.shape
+        # Step 1: initial mask
+        mask = intensity <= 0
+        # Step 2: unmask pixels with opposite neighbors > 0
+        to_unmask = []
+        for y in range(H):
+            for x in range(W):
+                if mask[y, x]:
+                    # left & right
+                    if x-1 >= 0 and x+1 < W and intensity[y, x-1] > 0 and intensity[y, x+1] > 0:
+                        to_unmask.append((y, x))
+                        continue
+                    # up & down
+                    if y-1 >= 0 and y+1 < H and intensity[y-1, x] > 0 and intensity[y+1, x] > 0:
+                        to_unmask.append((y, x))
+        for y, x in to_unmask:
+            mask[y, x] = False
+        # Step 3: remove small components (<=4)
+        visited = np.zeros((H, W), dtype=bool)
+        for i in range(H):
+            for j in range(W):
+                if mask[i, j] and not visited[i, j]:
+                    # BFS component
+                    queue = deque([(i, j)])
+                    comp = []
+                    visited[i, j] = True
+                    while queue:
+                        y, x = queue.popleft()
+                        comp.append((y, x))
+                        for dy, dx in ((1,0),(-1,0),(0,1),(0,-1)):
+                            ny, nx = y+dy, x+dx
+                            if 0 <= ny < H and 0 <= nx < W and mask[ny, nx] and not visited[ny, nx]:
+                                visited[ny, nx] = True
+                                queue.append((ny, nx))
+                    if len(comp) <= 4:
+                        # unmask small component
+                        for y, x in comp:
+                            mask[y, x] = False
+        return mask
+    
     def integrateSingleImage(self, da: xr.DataArray) -> xr.DataArray:
         """
         Perform 2D grazing-incidence integration on a single detector image.
@@ -139,6 +188,20 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         # integration
         print(f"Incidence Angle (rad): {self.incident_angle}")
         method = ("bbox", "csr", "cython") if self.split_pixels else 'no'
+
+            # if splitting, get base integration to build secondary mask
+        if self.split_pixels:
+            base = self.integrator.integrate2d_grazing_incidence(
+                data=img, unit_ip="qip_A^-1", unit_oop="qoop_A^-1",
+                npt_ip=self.npt_ip, npt_oop=self.npt_oop,
+                mask=self.mask, sample_orientation=self.sample_orientation,
+                incident_angle=self.incident_angle, tilt_angle=self.tilt_angle,
+                method='no'
+            )
+            sec_mask = self._generate_secondary_mask(base.intensity)
+        else:
+            sec_mask = None
+
         result = self.integrator.integrate2d_grazing_incidence(
             data=img,
             unit_ip="qip_A^-1",
@@ -152,9 +215,14 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
             method=method
         )
 
+        data = result.intensity
+        if sec_mask is not None:
+            # apply secondary mask: set masked pixels to nan
+            data = np.where(sec_mask, np.nan, data)
+
         # wrap into DataArray
         out_da = xr.DataArray(
-            data=result.intensity,
+            data=data,
             dims=("qoop", "qip"),
             coords={
                 "qoop": ("qoop", result.azimuthal, {"units": "1/Å"}),
@@ -170,7 +238,6 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         return out_da
 
     ### Methods to potentially add into the integrateSingleImage workflow provided user options for PFFI integrator.
-
     def integrate2d_exitangles(self, da: xr.DataArray) -> xr.DataArray:
         """
         Map intensities to detector exit angles (chi/psi).
