@@ -33,6 +33,9 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         If True, use pixel-splitting method for integration; if False, disable splitting (method=None).
     rotate_input : bool, default False
         If True, rotates input image by 90° (swap pix_x, pix_y) before integration.
+    output_space : str, default 'recip'
+        Integration output type: 'recip' (q_oop vs q_ip), 'polar' (polar angles vs |q|),
+        'azimuth1d' (1D grazing-incidence line cut), or 'exit' (exit-angle map).
     **kwargs : dict
         Additional params for PFGeneralIntegrator (dist, poni1/2, rot1/2/3, pixel1/2, wavelength).
     """
@@ -45,6 +48,7 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         npt_oop: int = None,
         split_pixels: bool = False,
         rotate_input: bool = False,
+        output_space: str = 'recip',
         **kwargs
     ):
         self.sample_orientation = sample_orientation
@@ -57,6 +61,8 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         self.npt_oop = npt_oop
         self.rotate_input = rotate_input
         self.split_pixels = split_pixels
+
+        self.output_space = output_space.lower() if isinstance(output_space, str) else 'recip'
 
         # should we define the output space or integration method?
         super().__init__(**kwargs)
@@ -133,33 +139,25 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
     
     def integrateSingleImage(self, da: xr.DataArray) -> xr.DataArray:
         """
-        Perform 2D grazing-incidence integration on a single detector image.
-
-        Transforms pixel intensities to q_oop vs. q_ip.
+        Perform integration on a single detector image according to output_space.
         """
-        # raw image array
+        # Prepare image array
         img = np.squeeze(da.values) if da.ndim > 2 else da.values
-        # original detector dims
-        try:
-            orig_py = da.sizes["pix_y"]
-            orig_px = da.sizes["pix_x"]
-        except KeyError:
-            raise ValueError("DataArray must have 'pix_y' and 'pix_x' dims.")
 
-        # rotate input if requested
+        # Rotate input if requested
         if self.rotate_input:
             img = np.rot90(img, k=1)
             if self.mask is not None:
                 self.mask = np.rot90(self.mask, k=1)
 
-        # mask setup
+        # Mask setup
         if self.mask is None:
             warnings.warn(f"No mask defined, creating empty mask of shape {img.shape}", stacklevel=2)
             self.mask = np.zeros_like(img, dtype=bool)
         if self.mask.shape != img.shape:
             raise ValueError(f"Mask shape {self.mask.shape} does not match image shape {img.shape}")
 
-        # stacked dim
+        # Determine stacking dimension
         stack_dims = [d for d in da.dims if d not in ("pix_x", "pix_y")]
         if stack_dims:
             stack_dim = stack_dims[0]
@@ -167,17 +165,44 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
         else:
             stack_dim, coords = None, None
 
-        # infer integration grid
+        # Infer integration grid if not set
+        orig_py = da.sizes.get("pix_y", img.shape[0])
+        orig_px = da.sizes.get("pix_x", img.shape[1])
         if self.npt_ip is None:
-            self.npt_ip = orig_py if self.rotate_input else orig_px
+            self.npt_ip = orig_px
         if self.npt_oop is None:
-            self.npt_oop = orig_px if self.rotate_input else orig_py
+            self.npt_oop = orig_py
 
-        # integration
-        print(f"Incidence Angle (rad): {self.incident_angle}")
-        method = ("bbox", "csr", "cython") if self.split_pixels else 'no'
+        # Dispatch based on output_space
+        space = self.output_space
+        if space not in ('recip', 'polar', 'azimuth1d', 'exit'):
+            space = 'recip'
 
-        ## NOTE: This is a hacky fix to pyFAI filling in the missing wedge with pixel splitting. 
+        if space == 'polar':
+            out_da = self.integrate2d_polar(da)
+        elif space == 'azimuth1d':
+            out_da = self.integrate1d(da)
+        elif space == 'exit':
+            out_da = self.integrate2d_exitangles(da)
+        else:
+            out_da = self._integrate_recip(da, img)
+
+        # Re-apply stacking dim
+        if stack_dim and stack_dim in da.coords:
+            out_da = out_da.expand_dims({stack_dim: len(coords)}) \
+                           .assign_coords({stack_dim: coords})
+
+        return out_da
+    
+    def _integrate_recip(self, da: xr.DataArray, img: np.ndarray) -> xr.DataArray:
+        """
+        Core reciprocal-space integration using integrate2d_grazing_incidence.
+        NOTE: This is a hacky fix to pyFAI filling in the missing wedge with pixel splitting.
+        All mask generation and split-pixel corrections happen here.
+        """
+        # choose method for pixel splitting
+        method = 'no' if not self.split_pixels else ('bbox', 'csr', 'cython')
+
         # if splitting, get base integration to build secondary mask
         if self.split_pixels:
             base = self.integrator.integrate2d_grazing_incidence(
@@ -188,31 +213,32 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
                 method='no'
             )
             sec_mask = self._generate_secondary_mask(base.intensity)
-            print ('(PyHyper) WARNING: This is a hacky-fix to use splitpix with pyFAI so the missing wedge does not show up. If you are using this, you should understand reciprocal space corrections. Also, you should know that this is not perfect, it should be replaced with the actual wedge calculation to generate the mask.')
+            print('(PyHyper) WARNING: This is a hacky-fix to use splitpix with pyFAI so the missing wedge does not show up. '
+                  'If you are using this, you should understand reciprocal space corrections. Also, you should know that '
+                  'this is not perfect, it should (will) eventually be replaced with the actual wedge calculation to generate the mask.')
         else:
             sec_mask = None
 
+        # perform the actual reciprocal-space integration
         result = self.integrator.integrate2d_grazing_incidence(
             data=img,
             unit_ip="qip_A^-1",
             unit_oop="qoop_A^-1",
             npt_ip=self.npt_ip,
             npt_oop=self.npt_oop,
-            # mask=self.mask,
             mask=None,
             sample_orientation=self.sample_orientation,
             incident_angle=self.incident_angle,
             tilt_angle=self.tilt_angle,
             method=method
         )
-        
 
+        # extract intensity and apply secondary mask if present
         data = result.intensity
         if sec_mask is not None:
-            # apply secondary mask: set masked pixels to nan
             data = np.where(sec_mask, np.nan, data)
 
-        # wrap into DataArray
+        # build output DataArray
         out_da = xr.DataArray(
             data=data,
             dims=("qoop", "qip"),
@@ -222,70 +248,38 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
             },
             attrs=da.attrs
         )
-
-        if stack_dim:
-            out_da = out_da.expand_dims({stack_dim: len(coords)}) \
-                           .assign_coords({stack_dim: coords})
-
         return out_da
 
-    ### Methods to potentially add into the integrateSingleImage workflow provided user options for PFFI integrator.
-    def integrate2d_exitangles(self, da: xr.DataArray) -> xr.DataArray:
-        """
-        Map intensities to detector exit angles (chi/psi).
-
-        Provides a 2D intensity map of vertical vs horizontal exit angles in radians.
-
-        Parameters
-        ----------
-        da : xarray.DataArray
-            Raw detector image.
-
-        Returns
-        -------
-        xarray.DataArray
-            Intensity with dims ('exit_angle_vertical','exit_angle_horizontal') and radian units.
-        """
-        img = np.squeeze(da.values)
-        result = self.integrator.integrate2d_exitangles(
-            data=img,
-            npt_ip=self.npt_ip,
-            npt_oop=self.npt_oop,
-            sample_orientation=self.sample_orientation,
-            incident_angle=self.incident_angle,
-            tilt_angle=self.tilt_angle,
-            mask=self.mask
-        )
-
-        return xr.DataArray(
-            data=result.intensity,
-            dims=("exit_angle_vertical", "exit_angle_horizontal"),
-            coords={
-                "exit_angle_vertical": ("exit_angle_vertical", result.oop, {"units": "rad"}),
-                "exit_angle_horizontal": ("exit_angle_horizontal", result.ip, {"units": "rad"}),
-            },
-            attrs=da.attrs
-        )
-
+    ## Need to update this to plot in degrees (optional)
     def integrate2d_polar(self, da: xr.DataArray, polar_degrees: bool = False) -> xr.DataArray:
         """
-        Convert to polar coordinates: azimuthal angle vs q magnitude.
-
-        All q values are in 1/Å. Polar angle units default to radians.
-
-        Parameters
-        ----------
-        da : xarray.DataArray
-            Raw detector image.
-        polar_degrees : bool, default False
-            If True, polar angle coords are in degrees.
-
-        Returns
-        -------
-        xarray.DataArray
-            Intensity with dims ('polar_angle','q_mod') and units metadata.
+        Convert to polar coordinates: azimuthal angle vs q magnitude, with optional splitpix mask.
         """
         img = np.squeeze(da.values)
+        
+        ## turning this off for now, needs more testing.
+        if self.split_pixels:
+            self.split_pixels = False
+
+        # determine split-pixel method
+        method = ('bbox','csr','cython') if self.split_pixels else 'no'
+        # hack: build secondary mask via non-splitting integration
+        if self.split_pixels:
+            base = self.integrator.integrate2d_polar(
+                data=img,
+                sample_orientation=self.sample_orientation,
+                incident_angle=self.incident_angle,
+                tilt_angle=self.tilt_angle,
+                polar_degrees=polar_degrees,
+                radial_unit="A^-1",
+                mask=self.mask,
+                method='no'
+            )
+            sec_mask = self._generate_secondary_mask(base.intensity)
+            print('(PyHyper) WARNING: Hacky splitpix in polar mode; missing-wedge correction applies.')
+        else:
+            sec_mask = None
+        # perform polar integration with splitpix method if enabled
         result = self.integrator.integrate2d_polar(
             data=img,
             sample_orientation=self.sample_orientation,
@@ -293,19 +287,23 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
             tilt_angle=self.tilt_angle,
             polar_degrees=polar_degrees,
             radial_unit="A^-1",
-            mask=self.mask
+            mask=None if self.split_pixels else self.mask,
+            method=method
         )
+        data = result.intensity
+        if sec_mask is not None:
+            data = np.where(sec_mask, np.nan, data)
         angle_units = "deg" if polar_degrees else "rad"
         return xr.DataArray(
-            data=result.intensity,
+            data=data,
             dims=("polar_angle", "q_mod"),
             coords={
                 "polar_angle": ("polar_angle", result.azimuthal, {"units": angle_units}),
-                "q_mod": ("q_mod", result.radial, {"units": "1/Å"}),
+                "q_mod":         ("q_mod",       result.radial,    {"units": "1/Å"}),
             },
             attrs=da.attrs
         )
-
+    
     def integrate1d(self, da: xr.DataArray, vertical_integration: bool = True) -> xr.DataArray:
         """
         Perform 1D grazing-incidence integration (line cut).
@@ -349,6 +347,43 @@ class PFFIGeneralIntegrator(PFGeneralIntegrator):
             attrs=da.attrs
         )
     
+    def integrate2d_exitangles(self, da: xr.DataArray) -> xr.DataArray:
+        """
+        Map intensities to detector exit angles (chi/psi).
+
+        Provides a 2D intensity map of vertical vs horizontal exit angles in radians.
+
+        Parameters
+        ----------
+        da : xarray.DataArray
+            Raw detector image.
+
+        Returns
+        -------
+        xarray.DataArray
+            Intensity with dims ('exit_angle_vertical','exit_angle_horizontal') and radian units.
+        """
+        img = np.squeeze(da.values)
+        result = self.integrator.integrate2d_exitangles(
+            data=img,
+            npt_ip=self.npt_ip,
+            npt_oop=self.npt_oop,
+            sample_orientation=self.sample_orientation,
+            incident_angle=self.incident_angle,
+            tilt_angle=self.tilt_angle,
+            mask=self.mask
+        )
+
+        return xr.DataArray(
+            data=result.intensity,
+            dims=("exit_angle_vertical", "exit_angle_horizontal"),
+            coords={
+                "exit_angle_vertical": ("exit_angle_vertical", result.oop, {"units": "rad"}),
+                "exit_angle_horizontal": ("exit_angle_horizontal", result.ip, {"units": "rad"}),
+            },
+            attrs=da.attrs
+        )
+
     def __str__(self) -> str:
         return (
             f"FiberIntegrator SDD={self.dist} m, sample_orientation={self.sample_orientation}, "

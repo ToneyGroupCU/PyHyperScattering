@@ -1,3 +1,6 @@
+import os
+from datetime import datetime
+
 import warnings
 import xarray as xr
 import numpy as np
@@ -260,3 +263,37 @@ class CMSGIWAXS:
 
         return raw_DS, integ_DS
 
+    def save_processed_image(self,
+                             processed_da: xr.DataArray,
+                             base_name: str,
+                             output_dir: str = None):
+        """
+        Save a processed xarray.DataArray and its coordinate arrays to .npy files.
+
+        Parameters:
+        -----------
+        processed_da : xr.DataArray
+            The processed DataArray (e.g., output of integrateSingleImage).
+        base_name : str
+            User-defined base name for files.
+        output_dir : str, optional
+            Directory in which to create the timestamped folder. Defaults to cwd.
+        """
+        # Generate timestamped folder name
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder_name = f"{base_name}_{timestamp}"
+        target_root = output_dir or os.getcwd()
+        target_folder = os.path.join(target_root, folder_name)
+        os.makedirs(target_folder, exist_ok=True)
+
+        # Save full data array
+        data_path = os.path.join(target_folder, f"data_{folder_name}.npy")
+        np.save(data_path, processed_da.values)
+
+        # Save each coordinate separately
+        for dim_name, coord in processed_da.coords.items():
+            coord_path = os.path.join(target_folder,
+                                      f"{dim_name}_{folder_name}.npy")
+            np.save(coord_path, coord.values)
+
+        print(f"Saved processed image and coordinates to: {target_folder}")
